@@ -209,9 +209,10 @@ class GsCoreAdapter(Star):
                                 getattr(logger, _type)(_data.data)
                         continue
 
+                    bid = msg.bot_id if msg.bot_id != 'onebot' else 'aiocqhttp'
                     if msg.target_id and msg.content:
                         session = MessageSesion(
-                            msg.bot_id,
+                            bid,
                             (
                                 MessageType.GROUP_MESSAGE
                                 if msg.target_type == 'group'
@@ -249,10 +250,10 @@ async def to_msg(gsmsgs: List[GsMessage]) -> MessageChain:
                 message.message(_c.data)
             elif _c.type == 'image':
                 if _c.data.startswith('link://'):
-                    message.url_image(_c.data.replace('link://', ''))
+                    message.url_image(_c.data[7:])
                 else:
                     if _c.data.startswith('base64://'):
-                        _c.data = _c.data.replace('base64://', '')
+                        _c.data = _c.data[9:]
                     message.chain.append(
                         Image.fromBase64(_c.data),  # type: ignore
                     )
