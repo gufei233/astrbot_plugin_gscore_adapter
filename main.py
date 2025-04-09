@@ -10,7 +10,15 @@ import websockets.client
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, register
-from astrbot.core.message.components import At, File, Image, Plain, Reply
+from astrbot.core.message.components import (
+    At,
+    BaseMessageComponent,
+    File,
+    Image,
+    Node,
+    Plain,
+    Reply,
+)
 from astrbot.core.platform.astr_message_event import MessageSesion
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.star.filter.event_message_type import EventMessageType
@@ -27,7 +35,7 @@ gsconnecting = False
 @register(
     "astrbot_plugin_gscore_adapter",
     "KimigaiiWuyi",
-    "用于链接SayuCore（早柚核心）的适配器！适用于多种游戏功能, 原神、星铁、鸣朝、雀魂等游戏的最佳工具箱！",
+    "用于链接SayuCore（早柚核心）的适配器！适用于多种游戏功能, 原神、星铁、绝区零、鸣朝、雀魂等游戏的最佳工具箱！",
     "0.1",
 )
 class GsCoreAdapter(Star):
@@ -220,8 +228,10 @@ class GsCoreAdapter(Star):
                             ),
                             msg.msg_id,
                         )
-                        message_chain = await to_msg(msg.content)
-                        await self.context.send_message(session, message_chain)
+                        messages = MessageChain()
+                        chain_list = await to_msg(msg.content, bid)
+                        messages.chain.extend(chain_list)
+                        await self.context.send_message(session, messages)
                 except Exception as e:
                     logger.error(e)
         except RuntimeError:
@@ -241,31 +251,41 @@ class GsCoreAdapter(Star):
                     logger.debug('自动连接core服务器失败...五秒后重新连接...')
 
 
-async def to_msg(gsmsgs: List[GsMessage]) -> MessageChain:
-    message = MessageChain()
+async def to_msg(
+    gsmsgs: List[GsMessage],
+    bot_id: str,
+) -> List[BaseMessageComponent]:
+    message: List[BaseMessageComponent] = []
 
     for _c in gsmsgs:
         if _c.data:
             if _c.type == 'text':
-                message.message(_c.data)
+                message.append(Plain(_c.data))
             elif _c.type == 'image':
                 if _c.data.startswith('link://'):
-                    message.url_image(_c.data[7:])
+                    message.append(Image.fromURL(_c.data[7:]))
                 else:
                     if _c.data.startswith('base64://'):
                         _c.data = _c.data[9:]
-                    message.chain.append(
+                    message.append(
                         Image.fromBase64(_c.data),  # type: ignore
                     )
             elif _c.type == 'node':
-                pass
+                if bot_id == 'aiocqhttp':
+                    node_message: List[BaseMessageComponent] = []
+                    for _node in _c.data:
+                        node_message.extend(await to_msg(_node, bot_id))
+                    message.append(Node(node_message))
+                else:
+                    for _node in _c.data:
+                        message.extend(await to_msg(_node, bot_id))
             elif _c.type == 'file':
                 file_name, file_content = _c.data.split('|')
                 path = Path(__file__).resolve().parent / file_name
                 store_file(path, file_content)
-                message.chain.append(File(file_name, str(path)))
+                message.append(File(file_name, str(path)))
             elif _c.type == 'at':
-                message.chain.append(At(qq=_c.data))
+                message.append(At(qq=_c.data))
     return message
 
 
