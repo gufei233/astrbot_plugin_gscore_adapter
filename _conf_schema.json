@@ -1,0 +1,20 @@
+{
+    "IP": {
+        "description": "链接至GsCore的IP地址",
+        "type": "string",
+        "hint": "默认应为127.0.0.1或localhost",
+        "default": "localhost"
+    },
+    "PORT": {
+        "description": "链接至GsCore的端口",
+        "type": "string",
+        "hint": "默认应为8765",
+        "default": "8765"
+    },
+    "BOT_ID": {
+        "description": "向GsCore注册自身的Bot",
+        "type": "string",
+        "hint": "默认应为AstrBot",
+        "default": "AstrBot"
+    }
+}

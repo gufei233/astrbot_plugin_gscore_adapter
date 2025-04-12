@@ -3,11 +3,11 @@ import base64
 import os
 from base64 import b64encode
 from pathlib import Path
-from typing import List, Union
+from typing import List
 
 import aiofiles
 import websockets.client
-from astrbot.api import logger
+from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.message.components import (
@@ -28,7 +28,6 @@ from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 from .models import Message as GsMessage
 from .models import MessageReceive, MessageSend
 
-BOT_ID = 'AstrBot'
 gsconnecting = False
 
 
@@ -40,27 +39,27 @@ gsconnecting = False
 )
 class GsCoreAdapter(Star):
 
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        self.config = config
         self.is_connect = False
+        self.BOT_ID = self.config.BOT_ID
+        self.IP = self.config.IP
+        self.PORT = self.config.PORT
 
-    @classmethod
     async def async_connect(
-        cls,
-        IP: str = 'localhost',
-        PORT: Union[str, int] = '8765',
+        self,
     ):
-        cls.is_alive = True
-        cls.ws_url = f'ws://{IP}:{PORT}/ws/{BOT_ID}'
-        logger.info(f'Bot_ID: {BOT_ID}连接至[gsuid-core]: {cls.ws_url}...')
-        cls.ws = await websockets.client.connect(  # type: ignore
-            cls.ws_url, max_size=2**26, open_timeout=60, ping_timeout=60
+        self.is_alive = True
+        self.ws_url = f'ws://{self.IP}:{self.PORT}/ws/{self.BOT_ID}'
+        logger.info(f'Bot_ID: {self.BOT_ID}连接至[gsuid-core]: {self.ws_url}...')
+        self.ws = await websockets.client.connect(  # type: ignore
+            self.ws_url, max_size=2**26, open_timeout=60, ping_timeout=60
         )
-        logger.info(f'与[gsuid-core]成功连接! Bot_ID: {BOT_ID}')
-        cls.is_connect = True
-        cls.msg_list = asyncio.queues.Queue()
-        cls.pending = []
-        return cls
+        logger.info(f'与[gsuid-core]成功连接! Bot_ID: {self.BOT_ID}')
+        self.is_connect = True
+        self.msg_list = asyncio.queues.Queue()
+        self.pending = []
 
     async def connect(self):
         global gsconnecting
@@ -246,7 +245,7 @@ class GsCoreAdapter(Star):
         except ConnectionClosedError:
             for task in self.pending:
                 task.cancel()
-            logger.warning(f'与[gsuid-core]断开连接! Bot_ID: {BOT_ID}')
+            logger.warning(f'与[gsuid-core]断开连接! Bot_ID: {self.BOT_ID}')
             self.is_alive = False
             for _ in range(30):
                 await asyncio.sleep(5)
