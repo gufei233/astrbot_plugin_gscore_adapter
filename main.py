@@ -95,9 +95,19 @@ class GsCoreAdapter(Star):
         )  # 用户所发的消息的消息链 # from astrbot.api.message_components import *
         logger.info(message_chain)
 
+        pn = event.get_platform_name()
         sender = {
             'nickname': user_name,
         }
+
+        self_id = event.get_self_id()
+        user_id = event.get_sender_id()
+        if pn == 'qq_official':
+            avatar = f'https://q.qlogo.cn/qqapp/{self_id}/{user_id}/100'
+        elif pn == 'aiocqhttp':
+            avatar = f'https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640'
+
+        sender['avatar'] = avatar
 
         message: List[GsMessage] = []
         for msg in message_chain:
@@ -164,15 +174,14 @@ class GsCoreAdapter(Star):
             if event.get_message_type() == MessageType.GROUP_MESSAGE
             else 'direct'
         )
-        pn = event.get_platform_name()
         pm = 1 if event.is_admin() else 6
 
         msg = MessageReceive(
             bot_id='onebot' if pn == 'aiocqhttp' else pn,
-            bot_self_id=event.get_self_id(),
+            bot_self_id=self_id,
             user_type=user_type,
             group_id=event.get_group_id(),
-            user_id=event.get_sender_id(),
+            user_id=user_id,
             sender=sender,
             content=message,
             msg_id=event.get_session_id(),
