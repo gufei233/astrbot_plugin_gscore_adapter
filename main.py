@@ -106,7 +106,8 @@ class GsCoreAdapter(Star):
             avatar = f'https://q.qlogo.cn/qqapp/{self_id}/{user_id}/100'
         elif pn == 'aiocqhttp':
             avatar = f'https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640'
-
+        else:
+            avatar = ''
         sender['avatar'] = avatar
 
         message: List[GsMessage] = []
@@ -211,38 +212,35 @@ class GsCoreAdapter(Star):
         try:
             await asyncio.sleep(5)
             async for message in self.ws:
-                try:
-                    msg = msgjson.decode(message, type=MessageSend)
-                    logger.info(
-                        f'【接收】[gsuid-core]: '
-                        f'{msg.bot_id} - {msg.target_type} - {msg.target_id}'
-                    )
-                    # 解析消息
-                    if msg.bot_id == 'AstrBot':
-                        if msg.content:
-                            _data = msg.content[0]
-                            if _data.type and _data.type.startswith('log'):
-                                _type = _data.type.split('_')[-1].lower()
-                                getattr(logger, _type)(_data.data)
-                        continue
+                # try:
+                msg = msgjson.decode(message, type=MessageSend)
+                logger.info(
+                    f'【接收】[gsuid-core]: '
+                    f'{msg.bot_id} - {msg.target_type} - {msg.target_id}'
+                )
+                # 解析消息
+                if msg.bot_id == 'AstrBot':
+                    if msg.content:
+                        _data = msg.content[0]
+                        if _data.type and _data.type.startswith('log'):
+                            _type = _data.type.split('_')[-1].lower()
+                            getattr(logger, _type)(_data.data)
+                    continue
 
-                    bid = msg.bot_id if msg.bot_id != 'onebot' else 'aiocqhttp'
-                    if msg.target_id and msg.content:
-                        session = MessageSesion(
-                            bid,
-                            (
-                                MessageType.GROUP_MESSAGE
-                                if msg.target_type == 'group'
-                                else MessageType.FRIEND_MESSAGE
-                            ),
-                            msg.msg_id,
-                        )
-                        messages = MessageChain()
-                        chain_list = await to_msg(msg.content, bid)
-                        messages.chain.extend(chain_list)
-                        await self.context.send_message(session, messages)
-                except Exception as e:
-                    logger.error(e)
+                bid = msg.bot_id if msg.bot_id != 'onebot' else 'aiocqhttp'
+                if msg.target_id and msg.content:
+                    session = MessageSesion(
+                        bid,
+                        (
+                            MessageType.GROUP_MESSAGE
+                            if msg.target_type == 'group'
+                            else MessageType.FRIEND_MESSAGE
+                        ),
+                        msg.msg_id,
+                    )
+                    await self.bot_send_msg(msg.content, session, bid)
+                # except Exception as e:
+                #    logger.exception(e)
         except RuntimeError:
             pass
         except ConnectionClosedError:
@@ -259,43 +257,65 @@ class GsCoreAdapter(Star):
                 except:  # noqa
                     logger.debug('自动连接core服务器失败...五秒后重新连接...')
 
+    async def _to_msg(
+        self, msg: List[GsMessage], bot_id: str
+    ) -> List[BaseMessageComponent]:
+        message = []
+        for _c in msg:
+            if _c.data:
+                if _c.type == 'text':
+                    message.append(Plain(_c.data))
+                elif _c.type == 'image':
+                    if _c.data.startswith('link://'):
+                        message.append(Image.fromURL(_c.data[7:]))
+                    else:
+                        if _c.data.startswith('base64://'):
+                            _c.data = _c.data[9:]
+                        message.append(
+                            Image.fromBase64(_c.data),  # type: ignore
+                        )
+                elif _c.type == 'node':
+                    if bot_id == 'aiocqhttp':
+                        node_message: List[GsMessage] = []
+                        for _node in _c.data:
+                            node_message.append(GsMessage(**_node))
 
-async def to_msg(
-    gsmsgs: List[GsMessage],
-    bot_id: str,
-) -> List[BaseMessageComponent]:
-    message: List[BaseMessageComponent] = []
+                        message.extend(
+                            Node(
+                                await self._to_msg(
+                                    node_message,
+                                    bot_id,
+                                )
+                            )
+                        )
+                    else:
+                        for _node in _c.data:
+                            message.extend(
+                                await self._to_msg(
+                                    [GsMessage(**_node)],
+                                    bot_id,
+                                )
+                            )
+                elif _c.type == 'file':
+                    file_name, file_content = _c.data.split('|')
+                    path = Path(__file__).resolve().parent / file_name
+                    store_file(path, file_content)
+                    message.append(File(file_name, str(path)))
+                elif _c.type == 'at':
+                    message.append(At(qq=_c.data))
+        return message
 
-    for _c in gsmsgs:
-        if _c.data:
-            if _c.type == 'text':
-                message.append(Plain(_c.data))
-            elif _c.type == 'image':
-                if _c.data.startswith('link://'):
-                    message.append(Image.fromURL(_c.data[7:]))
-                else:
-                    if _c.data.startswith('base64://'):
-                        _c.data = _c.data[9:]
-                    message.append(
-                        Image.fromBase64(_c.data),  # type: ignore
-                    )
-            elif _c.type == 'node':
-                if bot_id == 'aiocqhttp':
-                    node_message: List[BaseMessageComponent] = []
-                    for _node in _c.data:
-                        node_message.extend(await to_msg(_node, bot_id))
-                    message.append(Node(node_message))
-                else:
-                    for _node in _c.data:
-                        message.extend(await to_msg(_node, bot_id))
-            elif _c.type == 'file':
-                file_name, file_content = _c.data.split('|')
-                path = Path(__file__).resolve().parent / file_name
-                store_file(path, file_content)
-                message.append(File(file_name, str(path)))
-            elif _c.type == 'at':
-                message.append(At(qq=_c.data))
-    return message
+    async def bot_send_msg(
+        self,
+        gsmsgs: List[GsMessage],
+        session: MessageSesion,
+        bot_id: str,
+    ):
+        messages = MessageChain()
+        message = await self._to_msg(gsmsgs, bot_id)
+
+        messages.chain.extend(message)
+        await self.context.send_message(session, messages)
 
 
 def store_file(path: Path, file: str):
