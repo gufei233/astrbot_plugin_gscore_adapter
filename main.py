@@ -156,7 +156,7 @@ class GsCoreAdapter(Star):
                 message.append(
                     GsMessage(
                         type='at',
-                        data=msg.qq,
+                        data=str(msg.qq),
                     )
                 )
             elif isinstance(msg, Reply):
@@ -211,35 +211,35 @@ class GsCoreAdapter(Star):
         try:
             await asyncio.sleep(5)
             async for message in self.ws:
-                # try:
-                msg = msgjson.decode(message, type=MessageSend)
-                logger.info(
-                    f'【接收】[gsuid-core]: '
-                    f'{msg.bot_id} - {msg.target_type} - {msg.target_id}'
-                )
-                # 解析消息
-                if msg.bot_id == 'AstrBot':
-                    if msg.content:
-                        _data = msg.content[0]
-                        if _data.type and _data.type.startswith('log'):
-                            _type = _data.type.split('_')[-1].lower()
-                            getattr(logger, _type)(_data.data)
-                    continue
-
-                bid = msg.bot_id if msg.bot_id != 'onebot' else 'aiocqhttp'
-                if msg.target_id and msg.content:
-                    session = MessageSesion(
-                        bid,
-                        (
-                            MessageType.GROUP_MESSAGE
-                            if msg.target_type == 'group'
-                            else MessageType.FRIEND_MESSAGE
-                        ),
-                        msg.msg_id,
+                try:
+                    msg = msgjson.decode(message, type=MessageSend)
+                    logger.info(
+                        f'【接收】[gsuid-core]: '
+                        f'{msg.bot_id} - {msg.target_type} - {msg.target_id}'
                     )
-                    await self.bot_send_msg(msg.content, session, bid)
-                # except Exception as e:
-                #    logger.exception(e)
+                    # 解析消息
+                    if msg.bot_id == 'AstrBot':
+                        if msg.content:
+                            _data = msg.content[0]
+                            if _data.type and _data.type.startswith('log'):
+                                _type = _data.type.split('_')[-1].lower()
+                                getattr(logger, _type)(_data.data)
+                        continue
+
+                    bid = msg.bot_id if msg.bot_id != 'onebot' else 'aiocqhttp'
+                    if msg.target_id and msg.content:
+                        session = MessageSesion(
+                            bid,
+                            (
+                                MessageType.GROUP_MESSAGE
+                                if msg.target_type == 'group'
+                                else MessageType.FRIEND_MESSAGE
+                            ),
+                            msg.msg_id,
+                        )
+                        await self.bot_send_msg(msg.content, session, bid)
+                except Exception as e:
+                    logger.exception(e)
         except RuntimeError:
             pass
         except ConnectionClosedError:
