@@ -279,7 +279,7 @@ class GsCoreAdapter(Star):
                         for _node in _c.data:
                             node_message.append(GsMessage(**_node))
 
-                        message.extend(
+                        message.append(
                             Node(
                                 await self._to_msg(
                                     node_message,
