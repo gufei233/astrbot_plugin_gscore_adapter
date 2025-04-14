@@ -100,7 +100,7 @@ class GsCoreAdapter(Star):
         }
 
         self_id = event.get_self_id()
-        user_id = event.get_sender_id()
+        user_id = str(event.get_sender_id())
         if pn == 'qq_official':
             avatar = f'https://q.qlogo.cn/qqapp/{self_id}/{user_id}/100'
         elif pn == 'aiocqhttp':
