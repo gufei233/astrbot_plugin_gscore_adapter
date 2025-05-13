@@ -36,5 +36,5 @@ class MessageSend(Struct):
     bot_self_id: str = ''
     msg_id: str = ''
     target_type: Optional[str] = None
-    target_id: Optional[str] = None
+    target_id: str = ''
     content: Optional[List[Message]] = None

@@ -227,6 +227,13 @@ class GsCoreAdapter(Star):
                         continue
 
                     bid = msg.bot_id if msg.bot_id != 'onebot' else 'aiocqhttp'
+                    if bid == 'aiocqhttp' or bid == 'dingtalk' or bid == 'lark':
+                        session_id = msg.target_id
+                    elif bid == 'dingtalk':
+                        session_id = msg.target_id
+                    else:
+                        session_id = msg.msg_id
+
                     if msg.target_id and msg.content:
                         session = MessageSesion(
                             bid,
@@ -235,7 +242,7 @@ class GsCoreAdapter(Star):
                                 if msg.target_type == 'group'
                                 else MessageType.FRIEND_MESSAGE
                             ),
-                            msg.msg_id,
+                            session_id,
                         )
                         await self.bot_send_msg(msg.content, session, bid)
                 except Exception as e:
