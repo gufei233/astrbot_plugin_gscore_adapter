@@ -35,7 +35,7 @@ gsconnecting = False
     "astrbot_plugin_gscore_adapter",
     "KimigaiiWuyi",
     "用于链接SayuCore（早柚核心）的适配器！适用于多种游戏功能, 原神、星铁、绝区零、鸣朝、雀魂等游戏的最佳工具箱！",
-    "0.1",
+    "0.2",
 )
 class GsCoreAdapter(Star):
 
@@ -227,9 +227,13 @@ class GsCoreAdapter(Star):
                         continue
 
                     bid = msg.bot_id if msg.bot_id != 'onebot' else 'aiocqhttp'
-                    if bid == 'aiocqhttp' or bid == 'dingtalk' or bid == 'lark':
+                    if bid == 'aiocqhttp' or bid == 'dingtalk':
+                        session_id = msg.target_id
+                    elif bid == 'lark':
                         session_id = msg.target_id
                     elif bid == 'dingtalk':
+                        session_id = msg.target_id
+                    elif bid == 'wechatpadpro':
                         session_id = msg.target_id
                     else:
                         session_id = msg.msg_id
