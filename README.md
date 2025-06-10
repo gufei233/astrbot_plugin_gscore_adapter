@@ -1,4 +1,11 @@
-# ⚙️ astrbot_plugin_gscore_adapter v0.1
+# ⚙️ astrbot_plugin_gscore_adapter v0.3
+
+> [!IMPORTANT]  
+> 请注意！该插件并不能开箱即用，你还需要完成Core的安装和配置！！
+>
+> 如果使用Docker安装Core，请务必确保HOST和PORT填写正确，该插件可以修改链接Core的HOST和PORT！！
+>
+> 类似ISSUES [#12] [#10] 
 
 [早柚核心](https://docs.sayu-bot.com/)
 **💖一套业务逻辑，多个平台支持！**

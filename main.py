@@ -35,7 +35,7 @@ gsconnecting = False
     "astrbot_plugin_gscore_adapter",
     "KimigaiiWuyi",
     "用于链接SayuCore（早柚核心）的适配器！适用于多种游戏功能, 原神、星铁、绝区零、鸣朝、雀魂等游戏的最佳工具箱！",
-    "0.2",
+    "0.3",
 )
 class GsCoreAdapter(Star):
 
@@ -72,12 +72,19 @@ class GsCoreAdapter(Star):
                 gsconnecting = False
             except ConnectionRefusedError:
                 gsconnecting = False
-                logger.error('Core服务器连接失败...请稍后使用[启动core]命令启动...')
+                logger.error(
+                    '[链接错误] Core服务器连接失败...请确认是否根据文档安装【早柚核心】！'
+                )
 
     @filter.event_message_type(EventMessageType.ALL)
     async def on_all_message(self, event: AstrMessageEvent):
         if self.is_connect is False:
             await self.connect()
+
+        if not hasattr(self, 'ws'):
+            logger.error(
+                '[链接错误] Core服务器连接失败...请确认是否根据文档安装【早柚核心】！'
+            )
 
         assert self.ws is not None
         try:
@@ -325,6 +332,7 @@ class GsCoreAdapter(Star):
         message = await self._to_msg(gsmsgs, bot_id)
 
         messages.chain.extend(message)
+        logger.info(f'【即将发送】[gsuid-core]: {messages}')
         await self.context.send_message(session, messages)
 
 
