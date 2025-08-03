@@ -35,7 +35,7 @@ gsconnecting = False
     "astrbot_plugin_gscore_adapter",
     "KimigaiiWuyi",
     "用于链接SayuCore（早柚核心）的适配器！适用于多种游戏功能, 原神、星铁、绝区零、鸣朝、雀魂等游戏的最佳工具箱！",
-    "0.3",
+    "0.4",
 )
 class GsCoreAdapter(Star):
 
@@ -144,7 +144,10 @@ class GsCoreAdapter(Star):
                             )
             elif isinstance(msg, File):
                 if msg.file and msg.name:
-                    file_val = await file_to_base64(Path(msg.file))
+                    if msg.file_:
+                        file_val = await file_to_base64(Path(msg.file_))
+                    else:
+                        file_val = msg.url
                     file_name = msg.name
                     message.append(
                         GsMessage(
