@@ -186,9 +186,11 @@ class GsCoreAdapter(Star):
         )
         pm = 1 if event.is_admin() else 6
 
+        platform_id = event.get_platform_id()
         msg = MessageReceive(
+            # bot_id在gscore内部数据库具有唯一标识符，修改将会造成breaking change
             bot_id='onebot' if pn == 'aiocqhttp' else pn,
-            bot_self_id=self_id,
+            bot_self_id=platform_id,
             user_type=user_type,
             group_id=event.get_group_id(),
             user_id=user_id,
@@ -210,12 +212,12 @@ class GsCoreAdapter(Star):
             await self.ws.send(msg_send)
 
     async def start(self):
-        recv_task = asyncio.create_task(self.recv_msg())
-        send_task = asyncio.create_task(self.send_msg())
-        _, self.pending = await asyncio.wait(
-            [recv_task, send_task],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        asyncio.create_task(self.recv_msg())
+        asyncio.create_task(self.send_msg())
+        # _, self.pending = await asyncio.wait(
+        #     [recv_task, send_task],
+        #     return_when=asyncio.FIRST_COMPLETED,
+        # )
 
     async def recv_msg(self):
         try:
@@ -236,7 +238,7 @@ class GsCoreAdapter(Star):
                                 getattr(logger, _type)(_data.data)
                         continue
 
-                    bid = msg.bot_id if msg.bot_id != 'onebot' else 'aiocqhttp'
+                    bid = msg.bot_id
                     if bid == 'aiocqhttp' or bid == 'dingtalk':
                         session_id = msg.target_id
                     elif bid == 'lark':
@@ -248,9 +250,13 @@ class GsCoreAdapter(Star):
                     else:
                         session_id = msg.msg_id
 
+                    if session_id is None:
+                        logger.warning(f'[GsCore] 消息{msg}没有session_id')
+                        continue
+
                     if msg.target_id and msg.content:
                         session = MessageSesion(
-                            bid,
+                            msg.bot_self_id,
                             (
                                 MessageType.GROUP_MESSAGE
                                 if msg.target_type == 'group'
