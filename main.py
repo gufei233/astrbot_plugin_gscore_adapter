@@ -240,16 +240,9 @@ class GsCoreAdapter(Star):
                         continue
 
                     bid = msg.bot_id
-                    if bid == 'aiocqhttp' or bid == 'dingtalk':
-                        session_id = msg.target_id
-                    elif bid == 'lark':
-                        session_id = msg.target_id
-                    elif bid == 'dingtalk':
-                        session_id = msg.target_id
-                    elif bid == 'wechatpadpro':
-                        session_id = msg.target_id
-                    else:
-                        session_id = msg.msg_id
+                    
+                    session_id = msg.target_id
+                    
 
                     if session_id is None:
                         logger.warning(f'[GsCore] 消息{msg}没有session_id')
