@@ -30,7 +30,6 @@ from .models import Message as GsMessage
 from .models import MessageReceive, MessageSend
 
 gsconnecting = False
-# 🔧 新增：用于记录已创建的实例，防止重复
 _instances: Dict[str, 'GsCoreAdapter'] = {}
 
 
@@ -38,7 +37,7 @@ _instances: Dict[str, 'GsCoreAdapter'] = {}
     "astrbot_plugin_gscore_adapter",
     "KimigaiiWuyi",
     "用于链接SayuCore（早柚核心）的适配器！适用于多种游戏功能, 原神、星铁、绝区零、鸣朝、雀魂等游戏的最佳工具箱！",
-    "0.5.6",
+    "0.5.8",
 )
 class GsCoreAdapter(Star):
 
@@ -49,14 +48,11 @@ class GsCoreAdapter(Star):
         self.BOT_ID = self.config.BOT_ID
         self.IP = self.config.IP
         self.PORT = self.config.PORT
-        # 缓存 bot_self_id 映射 {bot_id: bot_self_id}
         self.bot_self_id_cache: Dict[str, str] = {}
         
-        # 检查并注册单例
         instance_key = f"{self.IP}:{self.PORT}:{self.BOT_ID}"
         if instance_key in _instances:
             logger.warning(f'[gsuid-core] 检测到重复实例: {instance_key}，使用已有实例')
-            # 复用已有实例的连接
             existing = _instances[instance_key]
             self.ws = existing.ws
             self.is_connect = existing.is_connect
@@ -82,7 +78,6 @@ class GsCoreAdapter(Star):
     async def connect(self):
         global gsconnecting
         
-        # 先检查是否已连接
         instance_key = f"{self.IP}:{self.PORT}:{self.BOT_ID}"
         if instance_key in _instances:
             existing = _instances[instance_key]
@@ -126,18 +121,13 @@ class GsCoreAdapter(Star):
             await self.connect()
 
         user_name = event.get_sender_name()
-
         logger.debug(event.unified_msg_origin)
-
         message_chain = event.get_messages()
         logger.info(message_chain)
 
         pn = event.get_platform_name()
-        sender = {
-            'nickname': user_name,
-        }
+        sender = {'nickname': user_name}
 
-        # 修复 bot_self_id 为空的问题
         self_id = event.get_self_id()
         if not self_id or self_id == "None":
             try:
@@ -173,12 +163,7 @@ class GsCoreAdapter(Star):
                     img_path = msg.url
                 if img_path:
                     if img_path.startswith('http'):
-                        message.append(
-                            GsMessage(
-                                type='image',
-                                data=img_path,
-                            )
-                        )
+                        message.append(GsMessage(type='image', data=img_path))
                     else:
                         if not os.path.exists(img_path):
                             img_path = Path(__file__).parent / img_path
@@ -186,62 +171,26 @@ class GsCoreAdapter(Star):
                             async with aiofiles.open(img_path, 'rb') as f:
                                 img_data = await f.read()
                             base64_data = b64encode(img_data).decode('utf-8')
-                            message.append(
-                                GsMessage(
-                                    type='image',
-                                    data=f'base64://{base64_data}',
-                                )
-                            )
+                            message.append(GsMessage(type='image', data=f'base64://{base64_data}'))
                         else:
                             logger.warning(f"图片文件不存在: {img_path}")
             elif isinstance(msg, File):
                 if msg.file and msg.name:
-                    if msg.file_:
-                        file_val = await file_to_base64(Path(msg.file_))
-                    else:
-                        file_val = msg.url
-                    file_name = msg.name
-                    message.append(
-                        GsMessage(
-                            type='file',
-                            data=f'{file_name}|{file_val}',
-                        )
-                    )
+                    file_val = await file_to_base64(Path(msg.file_)) if msg.file_ else msg.url
+                    message.append(GsMessage(type='file', data=f'{msg.name}|{file_val}'))
             elif isinstance(msg, Plain):
-                message.append(
-                    GsMessage(
-                        type='text',
-                        data=msg.text,
-                    )
-                )
+                message.append(GsMessage(type='text', data=msg.text))
             elif isinstance(msg, At):
-                message.append(
-                    GsMessage(
-                        type='at',
-                        data=str(msg.qq),
-                    )
-                )
+                message.append(GsMessage(type='at', data=str(msg.qq)))
             elif isinstance(msg, Reply):
-                message.append(
-                    GsMessage(
-                        type='reply',
-                        data=msg.id,
-                    )
-                )
+                message.append(GsMessage(type='reply', data=msg.id))
                 if hasattr(msg, 'chain') and msg.chain:
                     for reply_component in msg.chain:
                         if isinstance(reply_component, Image):
-                            img_path = reply_component.path
-                            if not img_path:
-                                img_path = reply_component.url
+                            img_path = reply_component.path or reply_component.url
                             if img_path:
                                 if img_path.startswith('http'):
-                                    message.append(
-                                        GsMessage(
-                                            type='image',
-                                            data=img_path,
-                                        )
-                                    )
+                                    message.append(GsMessage(type='image', data=img_path))
                                 else:
                                     if not os.path.exists(img_path):
                                         img_path = Path(__file__).parent / img_path
@@ -249,22 +198,13 @@ class GsCoreAdapter(Star):
                                         async with aiofiles.open(img_path, 'rb') as f:
                                             img_data = await f.read()
                                         base64_data = b64encode(img_data).decode('utf-8')
-                                        message.append(
-                                            GsMessage(
-                                                type='image',
-                                                data=f'base64://{base64_data}',
-                                            )
-                                        )
+                                        message.append(GsMessage(type='image', data=f'base64://{base64_data}'))
                                     else:
                                         logger.warning(f"引用消息中的图片文件不存在: {img_path}")
             else:
                 logger.warning(f'不支持的消息类型: {type(msg)}')
 
-        user_type = (
-            'group'
-            if event.get_message_type() == MessageType.GROUP_MESSAGE
-            else 'direct'
-        )
+        user_type = 'group' if event.get_message_type() == MessageType.GROUP_MESSAGE else 'direct'
         pm = 1 if event.is_admin() else 6
 
         platform_id = event.get_platform_id()
@@ -309,10 +249,7 @@ class GsCoreAdapter(Star):
             async for message in self.ws:
                 try:
                     msg = msgjson.decode(message, type=MessageSend)
-                    logger.info(
-                        f'【接收】[gsuid-core]: '
-                        f'{msg.bot_id} - {msg.target_type} - {msg.target_id}'
-                    )
+                    logger.info(f'【接收】[gsuid-core]: {msg.bot_id} - {msg.target_type} - {msg.target_id}')
                     
                     if msg.bot_id == 'AstrBot':
                         if msg.content:
@@ -323,22 +260,14 @@ class GsCoreAdapter(Star):
                         continue
 
                     bid = msg.bot_id
-
-                    if not msg.target_id:
-                        logger.warning(f'[GsCore] 消息没有target_id: {msg}')
-                        continue
-
-                    if not msg.content:
-                        logger.warning(f'[GsCore] 消息没有content: {msg}')
+                    if not msg.target_id or not msg.content:
+                        logger.warning(f'[GsCore] 消息缺少必要字段: {msg}')
                         continue
 
                     bot_self_id = msg.bot_self_id
-                    
                     if not bot_self_id or bot_self_id == "None" or bot_self_id == self.BOT_ID:
                         bot_self_id = self.bot_self_id_cache.get(bid)
-                        
                         if not bot_self_id:
-                            logger.warning(f'[GsCore] 无法找到 {bid} 的 bot_self_id 缓存，尝试从平台获取')
                             try:
                                 platforms = self.context.platform_manager.get_insts()
                                 for platform in platforms:
@@ -350,30 +279,26 @@ class GsCoreAdapter(Star):
                                         break
                             except Exception as e:
                                 logger.error(f'获取 bot_self_id 失败: {e}')
-                                bot_self_id = self.BOT_ID
+                            bot_self_id = bot_self_id or self.BOT_ID
                     
                     session = MessageSesion(
                         bot_self_id,
-                        (
-                            MessageType.GROUP_MESSAGE
-                            if msg.target_type == 'group'
-                            else MessageType.FRIEND_MESSAGE
-                        ),
+                        MessageType.GROUP_MESSAGE if msg.target_type == 'group' else MessageType.FRIEND_MESSAGE,
                         msg.target_id,
                     )
                     logger.info(f'【准备发送】session: {bot_self_id} - {msg.target_type} - {msg.target_id}')
                     await self.bot_send_msg(msg.content, session, bid)
                 except Exception as e:
                     logger.exception(f'[gsuid-core] 处理消息异常: {e}')
-        except RuntimeError as e:
-            logger.error(f'[gsuid-core] RuntimeError: {e}')
-        except ConnectionClosedError as e:
-            logger.error(f'[gsuid-core] ConnectionClosedError: {e}')
+        except RuntimeError:
+            pass
+        except ConnectionClosedError:
             for task in self.pending:
                 task.cancel()
             logger.warning(f'与[gsuid-core]断开连接! Bot_ID: {self.BOT_ID}')
             self.is_alive = False
             self.is_connect = False
+            # 自动重连逻辑
             for _ in range(30):
                 await asyncio.sleep(5)
                 try:
@@ -385,9 +310,7 @@ class GsCoreAdapter(Star):
         except Exception as e:
             logger.exception(f'[gsuid-core] recv_msg 未知错误: {e}')
 
-    async def _to_msg(
-        self, msg: List[GsMessage], bot_id: str
-    ) -> List[BaseMessageComponent]:
+    async def _to_msg(self, msg: List[GsMessage], bot_id: str) -> List[BaseMessageComponent]:
         message = []
         for _c in msg:
             if _c.data:
@@ -401,34 +324,14 @@ class GsCoreAdapter(Star):
                     else:
                         if _c.data.startswith('base64://'):
                             _c.data = _c.data[9:]
-                        message.append(
-                            Image.fromBase64(_c.data),  # type: ignore
-                        )
+                        message.append(Image.fromBase64(_c.data))
                 elif _c.type == 'node':
                     if bot_id == 'onebot':
-                        node_message: List[Node] = []
-                        for _node in _c.data:
-                            node_message.append(
-                                Node(
-                                    await self._to_msg(
-                                        [GsMessage(**_node)],
-                                        bot_id,
-                                    )
-                                )
-                            )
-                        message.append(
-                            Nodes(
-                                node_message,
-                            )
-                        )
+                        node_message = [Node(await self._to_msg([GsMessage(**_node)], bot_id)) for _node in _c.data]
+                        message.append(Nodes(node_message))
                     else:
                         for _node in _c.data:
-                            message.extend(
-                                await self._to_msg(
-                                    [GsMessage(**_node)],
-                                    bot_id,
-                                )
-                            )
+                            message.extend(await self._to_msg([GsMessage(**_node)], bot_id))
                 elif _c.type == 'file':
                     file_name, file_content = _c.data.split('|', 1)
                     path = Path(__file__).resolve().parent / file_name
@@ -438,24 +341,17 @@ class GsCoreAdapter(Star):
                     message.append(At(qq=_c.data))
         return message
 
-    async def bot_send_msg(
-        self,
-        gsmsgs: List[GsMessage],
-        session: MessageSesion,
-        bot_id: str,
-    ):
+    async def bot_send_msg(self, gsmsgs: List[GsMessage], session: MessageSesion, bot_id: str):
         messages = MessageChain()
         message = await self._to_msg(gsmsgs, bot_id)
-
         messages.chain.extend(message)
         logger.info(f'【即将发送】[gsuid-core]: {messages}')
         await self.context.send_message(session, messages)
 
 
 def store_file(path: Path, file: str):
-    file_content = base64.b64decode(file)
     with open(path, 'wb') as f:
-        f.write(file_content)
+        f.write(base64.b64decode(file))
 
 
 def del_file(path: Path):
@@ -466,6 +362,4 @@ def del_file(path: Path):
 async def file_to_base64(file_path: Path):
     async with aiofiles.open(str(file_path), 'rb') as file:
         file_content = await file.read()
-    base64_encoded = b64encode(file_content)
-    base64_string = base64_encoded.decode('utf-8')
-    return base64_string
+    return b64encode(file_content).decode('utf-8')
