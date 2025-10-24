@@ -3,7 +3,7 @@ import base64
 import os
 from base64 import b64encode
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Set
 
 import aiofiles
 import websockets.client
@@ -36,7 +36,7 @@ gsconnecting = False
     "astrbot_plugin_gscore_adapter",
     "KimigaiiWuyi",
     "用于链接SayuCore（早柚核心）的适配器！适用于多种游戏功能, 原神、星铁、绝区零、鸣朝、雀魂等游戏的最佳工具箱！",
-    "0.4",
+    "0.6",
 )
 class GsCoreAdapter(Star):
 
@@ -77,6 +77,102 @@ class GsCoreAdapter(Star):
                     '[链接错误] Core服务器连接失败...请确认是否根据文档安装【早柚核心】！'
                 )
 
+
+    async def _normalize_image_component(self, img: Image) -> Optional[str]:
+        """
+        将 Image 组件统一为可发送到 Core 的字符串：
+        - http(s) 链接原样返回
+        - 本地文件读取为 base64://xxxxx
+        - 失败返回 None
+        """
+        img_path = getattr(img, "path", None) or getattr(img, "url", None)
+        if not img_path:
+            return None
+
+        img_path = str(img_path)
+
+        if img_path.startswith('http://') or img_path.startswith('https://'):
+            return img_path
+
+        candidate = Path(img_path)
+        if not candidate.exists():
+            candidate = Path(__file__).parent / img_path
+
+        if candidate.exists():
+            try:
+                async with aiofiles.open(candidate, 'rb') as f:
+                    img_data = await f.read()
+                base64_data = b64encode(img_data).decode('utf-8')
+                return f'base64://{base64_data}'
+            except Exception as e:
+                logger.warning(f'读取本地图片失败: {candidate} | err={e}')
+                return None
+        else:
+            logger.warning(f'图片路径不存在: {img_path}')
+            return None
+
+    async def _extract_images_from_any_chain(self, chain) -> List[str]:
+        """从一个消息链（list-like）里提取所有 Image 的可发送数据"""
+        out: List[str] = []
+        if not chain:
+            return out
+        for seg in chain:
+            if isinstance(seg, Image):
+                norm = await self._normalize_image_component(seg)
+                if not norm:
+                    # 兜底再尝试 to_dict
+                    try:
+                        d = await seg.to_dict()
+                        u = (d.get("data") or {}).get("url") or (d.get("data") or {}).get("file")
+                        if u:
+                            out.append(u)
+                            continue
+                    except Exception:
+                        pass
+                else:
+                    out.append(norm)
+        return out
+
+    async def _extract_images_from_reply(self, event: AstrMessageEvent, reply_seg: Reply) -> List[str]:
+        """
+        从 Reply 段中提取被引用消息的图片：
+        1) 优先读取 reply_seg.chain
+        2) 其次兼容 reply_seg.message / reply_seg.messages
+        3) 若仍无，在 aiocqhttp 平台下使用 get_msg 回拉原消息
+        """
+        images: List[str] = []
+
+        for attr in ("chain", "message", "messages"):
+            quoted_chain = getattr(reply_seg, attr, None)
+            if quoted_chain:
+                imgs = await self._extract_images_from_any_chain(quoted_chain)
+                images.extend(imgs)
+                if imgs:
+                    break  
+
+        if not images:
+            quoted_id = getattr(reply_seg, "id", None)
+            pn = event.get_platform_name()
+            if quoted_id and pn == 'aiocqhttp':
+                bot = getattr(event, "bot", None)
+                api = getattr(bot, "api", None) if bot else None
+                if api:
+                    try:
+                        try:
+                            mid = int(quoted_id)
+                        except Exception:
+                            mid = quoted_id
+                        raw = await api.get_msg(message_id=mid)
+                        for s in raw.get("message", []) or []:
+                            if isinstance(s, dict) and s.get("type") == "image":
+                                u = (s.get("data") or {}).get("url") or (s.get("data") or {}).get("file")
+                                if u:
+                                    images.append(u)
+                    except Exception as e:
+                        logger.warning(f'[gscore_adapter] 拉取引用原消息失败: id={quoted_id}, err={e}')
+        return images
+
+
     @filter.event_message_type(EventMessageType.ALL)
     async def on_all_message(self, event: AstrMessageEvent):
         if self.is_connect is False:
@@ -94,12 +190,9 @@ class GsCoreAdapter(Star):
             await self.connect()
 
         user_name = event.get_sender_name()
-
         logger.debug(event.unified_msg_origin)
 
-        message_chain = (
-            event.get_messages()
-        )  # 用户所发的消息的消息链 # from astrbot.api.message_components import *
+        message_chain = event.get_messages()  # 用户消息链
         logger.info(message_chain)
 
         pn = event.get_platform_name()
@@ -117,68 +210,55 @@ class GsCoreAdapter(Star):
             avatar = ''
         sender['avatar'] = avatar
 
-        message: List[GsMessage] = []
-        for msg in message_chain:
-            if isinstance(msg, Image):
-                img_path = msg.path
-                if not img_path:
-                    img_path = msg.url
-                if img_path:
-                    if img_path.startswith('http'):
-                        message.append(
-                            GsMessage(
-                                type='image',
-                                data=img_path,
-                            )
-                        )
+        # ----------------------- 构造待发送的消息 引用图片收集 -----------------------
+        gs_messages: List[GsMessage] = []
+        image_seen: Set[str] = set()
+
+        async def _append_image_data(data_str: Optional[str]):
+            if not data_str:
+                return
+            if data_str not in image_seen:
+                image_seen.add(data_str)
+                gs_messages.append(GsMessage(type='image', data=data_str))
+
+        # 当前消息中的图片
+        for seg in message_chain:
+            if isinstance(seg, Image):
+                norm = await self._normalize_image_component(seg)
+                await _append_image_data(norm)
+
+        # 处理 Reply
+        for seg in message_chain:
+            if isinstance(seg, Reply):
+                gs_messages.append(GsMessage(type='reply', data=seg.id))
+                try:
+                    quoted_imgs = await self._extract_images_from_reply(event, seg)
+                    for u in quoted_imgs:
+                        await _append_image_data(u)
+                except Exception as e:
+                    logger.warning(f'[gscore_adapter] 解析引用图片失败: {e}')
+
+        # 其它文本/文件/at
+        for seg in message_chain:
+            if isinstance(seg, Plain):
+                gs_messages.append(GsMessage(type='text', data=seg.text))
+            elif isinstance(seg, At):
+                gs_messages.append(GsMessage(type='at', data=str(seg.qq)))
+            elif isinstance(seg, File):
+                if seg.file and seg.name:
+                    if seg.file_:
+                        file_val = await file_to_base64(Path(seg.file_))
                     else:
-                        if not os.path.exists(img_path):
-                            img_path = Path(__file__).parent / img_path
-                            async with aiofiles.open(img_path, 'rb') as f:
-                                img_data = await f.read()
-                            base64_data = b64encode(img_data).decode('utf-8')
-                            message.append(
-                                GsMessage(
-                                    type='image',
-                                    data=f'base64://{base64_data}',
-                                )
-                            )
-            elif isinstance(msg, File):
-                if msg.file and msg.name:
-                    if msg.file_:
-                        file_val = await file_to_base64(Path(msg.file_))
-                    else:
-                        file_val = msg.url
-                    file_name = msg.name
-                    message.append(
-                        GsMessage(
-                            type='file',
-                            data=f'{file_name}|{file_val}',
-                        )
-                    )
-            elif isinstance(msg, Plain):
-                message.append(
-                    GsMessage(
-                        type='text',
-                        data=msg.text,
-                    )
-                )
-            elif isinstance(msg, At):
-                message.append(
-                    GsMessage(
-                        type='at',
-                        data=str(msg.qq),
-                    )
-                )
-            elif isinstance(msg, Reply):
-                message.append(
-                    GsMessage(
-                        type='reply',
-                        data=msg.id,
-                    )
-                )
-            else:
-                logger.warning(f'不支持的消息类型: {type(msg)}')
+                        file_val = seg.url
+                    file_name = seg.name
+                    gs_messages.append(GsMessage(type='file', data=f'{file_name}|{file_val}'))
+
+        # 打印收集到的图片数量与示例
+        if image_seen:
+            example = next(iter(image_seen))
+            logger.info(f'[gscore_adapter] 已收集图片数量: {len(image_seen)} | 示例: {example[:120]}...')
+        else:
+            logger.info('[gscore_adapter] 未收集到任何图片（当前消息与引用均为空）')
 
         user_type = (
             'group'
@@ -189,14 +269,13 @@ class GsCoreAdapter(Star):
 
         platform_id = event.get_platform_id()
         msg = MessageReceive(
-            # bot_id在gscore内部数据库具有唯一标识符，修改将会造成breaking change
             bot_id='onebot' if pn == 'aiocqhttp' else pn,
             bot_self_id=platform_id,
             user_type=user_type,
             group_id=event.get_group_id(),
             user_id=user_id,
             sender=sender,
-            content=message,
+            content=gs_messages,
             msg_id=event.get_session_id(),
             user_pm=pm,
         )
@@ -240,9 +319,7 @@ class GsCoreAdapter(Star):
                         continue
 
                     bid = msg.bot_id
-                    
                     session_id = msg.target_id
-                    
 
                     if session_id is None:
                         logger.warning(f'[GsCore] 消息{msg}没有session_id')
@@ -286,13 +363,14 @@ class GsCoreAdapter(Star):
                 if _c.type == 'text':
                     message.append(Plain(_c.data))
                 elif _c.type == 'image':
-                    if _c.data.startswith('link://'):
+                    if isinstance(_c.data, str) and _c.data.startswith('link://'):
                         message.append(Image.fromURL(_c.data[7:]))
                     else:
-                        if _c.data.startswith('base64://'):
-                            _c.data = _c.data[9:]
+                        data_str = _c.data
+                        if isinstance(data_str, str) and data_str.startswith('base64://'):
+                            data_str = data_str[9:]
                         message.append(
-                            Image.fromBase64(_c.data),  # type: ignore
+                            Image.fromBase64(data_str),  # type: ignore
                         )
                 elif _c.type == 'node':
                     # 特殊处理 qq 平台
