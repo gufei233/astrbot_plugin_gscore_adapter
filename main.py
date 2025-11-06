@@ -15,8 +15,8 @@ from astrbot.core.message.components import (
     BaseMessageComponent,
     File,
     Image,
-    Nodes,
     Node,
+    Nodes,
     Plain,
     Reply,
 )
@@ -36,7 +36,7 @@ gsconnecting = False
     "astrbot_plugin_gscore_adapter",
     "KimigaiiWuyi",
     "用于链接SayuCore（早柚核心）的适配器！适用于多种游戏功能, 原神、星铁、绝区零、鸣朝、雀魂等游戏的最佳工具箱！",
-    "0.4.2",
+    "0.4.3",
 )
 class GsCoreAdapter(Star):
 
@@ -144,18 +144,17 @@ class GsCoreAdapter(Star):
                                 )
                             )
             elif isinstance(msg, File):
-                if msg.file and msg.name:
-                    if msg.file_:
-                        file_val = await file_to_base64(Path(msg.file_))
-                    else:
-                        file_val = msg.url
-                    file_name = msg.name
-                    message.append(
-                        GsMessage(
-                            type='file',
-                            data=f'{file_name}|{file_val}',
-                        )
+                if msg.file_:
+                    file_val = await file_to_base64(Path(msg.file_))
+                else:
+                    file_val = msg.url
+                file_name = msg.name
+                message.append(
+                    GsMessage(
+                        type='file',
+                        data=f'{file_name}|{file_val}',
                     )
+                )
             elif isinstance(msg, Plain):
                 message.append(
                     GsMessage(
@@ -188,6 +187,9 @@ class GsCoreAdapter(Star):
         pm = 1 if event.is_admin() else 6
 
         platform_id = event.get_platform_id()
+        if platform_id is None:
+            platform_id = self_id
+
         msg = MessageReceive(
             # bot_id在gscore内部数据库具有唯一标识符，修改将会造成breaking change
             bot_id='onebot' if pn == 'aiocqhttp' else pn,

@@ -1,4 +1,4 @@
-# ⚙️ astrbot_plugin_gscore_adapter v0.3
+# ⚙️ astrbot_plugin_gscore_adapter v0.4.3
 
 > [!IMPORTANT]  
 > 请注意！该插件并不能开箱即用，你还需要完成Core的安装和配置！！
