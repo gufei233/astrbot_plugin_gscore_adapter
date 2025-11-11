@@ -176,6 +176,66 @@ class GsCoreAdapter(Star):
                         data=msg.id,
                     )
                 )
+                # 处理引用消息中的内容（如图片）
+                if hasattr(msg, 'chain') and msg.chain:
+                    logger.debug(f'处理引用消息链，包含 {len(msg.chain)} 个组件')
+                    for reply_msg in msg.chain:
+                        try:
+                            if isinstance(reply_msg, Image):
+                                img_path = reply_msg.path
+                                if not img_path:
+                                    img_path = reply_msg.url
+                                if img_path:
+                                    logger.debug(f'处理引用消息中的图片: {img_path}')
+                                    if img_path.startswith('http'):
+                                        message.append(
+                                            GsMessage(
+                                                type='image',
+                                                data=img_path,
+                                            )
+                                        )
+                                        logger.debug(f'添加引用消息中的HTTP图片: {img_path}')
+                                    else:
+                                        if not os.path.exists(img_path):
+                                            img_path = Path(__file__).parent / img_path
+                                        if os.path.exists(img_path):
+                                            async with aiofiles.open(img_path, 'rb') as f:
+                                                img_data = await f.read()
+                                            base64_data = b64encode(img_data).decode('utf-8')
+                                            message.append(
+                                                GsMessage(
+                                                    type='image',
+                                                    data=f'base64://{base64_data}',
+                                                )
+                                            )
+                                            logger.debug(f'添加引用消息中的本地图片: {img_path}')
+                                        else:
+                                            logger.warning(f'引用消息中的图片文件不存在: {img_path}')
+                                else:
+                                    logger.warning(f'引用消息中的图片路径为空: {reply_msg}')
+                            elif isinstance(reply_msg, Plain):
+                                # 也处理引用消息中的文本内容
+                                message.append(
+                                    GsMessage(
+                                        type='text',
+                                        data=reply_msg.text,
+                                    )
+                                )
+                                logger.debug(f'添加引用消息中的文本: {reply_msg.text[:50]}...')
+                            elif isinstance(reply_msg, At):
+                                # 处理引用消息中的@消息
+                                message.append(
+                                    GsMessage(
+                                        type='at',
+                                        data=str(reply_msg.qq),
+                                    )
+                                )
+                                logger.debug(f'添加引用消息中的At: {reply_msg.qq}')
+                            else:
+                                logger.debug(f'引用消息中包含不支持的消息类型: {type(reply_msg)}')
+                        except Exception as e:
+                            logger.error(f'处理引用消息组件时出错: {type(reply_msg)}, 错误: {e}')
+                            continue
             else:
                 logger.warning(f'不支持的消息类型: {type(msg)}')
 
