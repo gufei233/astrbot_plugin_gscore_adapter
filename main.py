@@ -36,7 +36,7 @@ gsconnecting = False
     "astrbot_plugin_gscore_adapter",
     "KimigaiiWuyi",
     "用于链接SayuCore（早柚核心）的适配器！适用于多种游戏功能, 原神、星铁、绝区零、鸣朝、雀魂等游戏的最佳工具箱！",
-    "0.4.3",
+    "0.4.5",
 )
 class GsCoreAdapter(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -46,12 +46,16 @@ class GsCoreAdapter(Star):
         self.BOT_ID = self.config.BOT_ID
         self.IP = self.config.IP
         self.PORT = self.config.PORT
+        self.WS_TOKEN = self.config.WS_TOKEN
 
     async def async_connect(
         self,
     ):
         self.is_alive = True
         self.ws_url = f"ws://{self.IP}:{self.PORT}/ws/{self.BOT_ID}"
+        if self.WS_TOKEN:
+            self.ws_url += f"?token={self.WS_TOKEN}"
+
         logger.info(f"Bot_ID: {self.BOT_ID}连接至[gsuid-core]: {self.ws_url}...")
         self.ws = await websockets.client.connect(  # type: ignore
             self.ws_url, max_size=2**26, open_timeout=60, ping_timeout=60

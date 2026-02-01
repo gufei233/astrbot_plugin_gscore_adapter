@@ -16,5 +16,11 @@
         "type": "string",
         "hint": "默认应为AstrBot",
         "default": "AstrBot"
+    },
+    "WS_TOKEN": {
+        "description": "连接Core的WsToken",
+        "type": "string",
+        "hint": "WsToken",
+        "default": ""
     }
 }
