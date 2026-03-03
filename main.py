@@ -80,6 +80,28 @@ class GsCoreAdapter(Star):
                     "[链接错误] Core服务器连接失败...请确认是否根据文档安装【早柚核心】！"
                 )
 
+    async def _convert_image(self, image_msg: Image):
+        img_path = getattr(image_msg, "path", None) or getattr(image_msg, "url", None)
+        if not img_path:
+            logger.warning(f"[GsCore] 图片消息缺少路径: {image_msg}")
+            return None
+
+        if isinstance(img_path, str) and img_path.startswith("http"):
+            return GsMessage(type="image", data=img_path)
+
+        file_path = Path(str(img_path))
+        if not file_path.exists():
+            file_path = Path(__file__).parent / str(img_path)
+        if not file_path.exists():
+            logger.warning(f"[GsCore] 图片文件不存在: {img_path}")
+            return None
+
+        async with aiofiles.open(file_path, "rb") as f:
+            img_data = await f.read()
+
+        base64_data = b64encode(img_data).decode("utf-8")
+        return GsMessage(type="image", data=f"base64://{base64_data}")
+
     @filter.event_message_type(EventMessageType.ALL)
     async def on_all_message(self, event: AstrMessageEvent):
         if self.is_connect is False:
@@ -123,29 +145,9 @@ class GsCoreAdapter(Star):
         message: list[GsMessage] = []
         for msg in message_chain:
             if isinstance(msg, Image):
-                img_path = msg.path
-                if not img_path:
-                    img_path = msg.url
-                if img_path:
-                    if img_path.startswith("http"):
-                        message.append(
-                            GsMessage(
-                                type="image",
-                                data=img_path,
-                            )
-                        )
-                    else:
-                        if not os.path.exists(img_path):
-                            img_path = Path(__file__).parent / img_path
-                            async with aiofiles.open(img_path, "rb") as f:
-                                img_data = await f.read()
-                            base64_data = b64encode(img_data).decode("utf-8")
-                            message.append(
-                                GsMessage(
-                                    type="image",
-                                    data=f"base64://{base64_data}",
-                                )
-                            )
+                image_data = await self._convert_image(msg)
+                if image_data:
+                    message.append(image_data)
             elif isinstance(msg, File):
                 if msg.file_:
                     file_val = await file_to_base64(Path(msg.file_))
@@ -179,6 +181,13 @@ class GsCoreAdapter(Star):
                         data=msg.id,
                     )
                 )
+                reply_chain = getattr(msg, "chain", None)
+                if reply_chain:
+                    for reply_msg in reply_chain:
+                        if isinstance(reply_msg, Image):
+                            image_data = await self._convert_image(reply_msg)
+                            if image_data:
+                                message.append(image_data)
             else:
                 logger.warning(f"不支持的消息类型: {type(msg)}")
 
