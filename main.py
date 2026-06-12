@@ -1,60 +1,105 @@
+"""AstrBot ↔ gsuid_core 适配器插件入口.
+
+职责(平台侧):
+- 插件生命周期: 加载即建立与 core 的 WS 连接, 卸载/重载时优雅断开;
+- 监听 AstrBot 全部消息事件, 转换为 MessageReceive 上报 core;
+- 监听平台元事件(进群/退群/戳一戳), 单独成包上报(见 meta_event.py);
+- GSCORE_ONLY_PREFIXES 命中时拦截 AstrBot 后续 LLM 流程.
+
+协议侧(连接/下发/回执/控制包)见 client.py 与 send_utils.py.
+"""
+
 import asyncio
-import base64
-import os
-import uuid
 from base64 import b64encode
+from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import override
 
 import aiofiles
-import websockets.client
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.star import Context, Star, register
-from astrbot.core.message.components import (
-    At,
-    BaseMessageComponent,
-    File,
-    Image,
-    Node,
-    Nodes,
-    Plain,
-    Record,
-    Reply,
-    Video,
-)
-from astrbot.core.platform.astr_message_event import MessageSesion
+from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
+from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.core.message.components import At, File, Image, Plain, Reply
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.star.filter.event_message_type import EventMessageType
-from msgspec import json as msgjson
-from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 
+from .client import GsClient
+from .meta_event import build_meta_receive
 from .models import Message as GsMessage
-from .models import MessageReceive, MessageSend
+from .models import MessageReceive
 
-gsconnecting = False
+PLUGIN_NAME = "astrbot_plugin_gscore_adapter"
+
+
+def _cfg_str(config: AstrBotConfig, key: str, default: str) -> str:
+    """从配置读取字符串项; AstrBotConfig 为弱类型 dict, 统一收窄为 str."""
+    val = config.get(key)
+    return str(val) if val is not None else default
+
+
+def _cfg_int(config: AstrBotConfig, key: str, default: int) -> int:
+    """从配置读取整数项; 非法值回退默认值."""
+    val = config.get(key)
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def _cfg_str_list(config: AstrBotConfig, key: str) -> list[str]:
+    """从配置读取字符串列表项, 过滤空串与非字符串元素."""
+    val = config.get(key)
+    if not isinstance(val, list):
+        return []
+    return [item for item in val if isinstance(item, str) and item]
 
 
 @register(
-    "astrbot_plugin_gscore_adapter",
+    PLUGIN_NAME,
     "KimigaiiWuyi",
     "用于链接SayuCore（早柚核心）的适配器！适用于多种游戏功能, 原神、星铁、绝区零、鸣朝、雀魂等游戏的最佳工具箱！",
-    "0.4.7",
+    "0.5.0",
 )
 class GsCoreAdapter(Star):
-    def __init__(self, context: Context, config: AstrBotConfig):
+    def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
-        self.config = config
-        self.is_connect = False
-        self.BOT_ID = self.config.BOT_ID
-        self.IP = self.config.IP
-        self.PORT = self.config.PORT
-        self.WS_TOKEN = self.config.WS_TOKEN
-        self.GSCORE_ONLY_PREFIXES = [
-            prefix
-            for prefix in getattr(self.config, "GSCORE_ONLY_PREFIXES", [])
-            if isinstance(prefix, str) and prefix
-        ]
-        self.MAX_RETRY_TIMES = getattr(self.config, "MAX_RETRY_TIMES", 30)
+        self.config: AstrBotConfig = config
+        self.GSCORE_ONLY_PREFIXES: list[str] = _cfg_str_list(
+            config, "GSCORE_ONLY_PREFIXES"
+        )
+
+        self.temp_dir: Path = StarTools.get_data_dir(PLUGIN_NAME) / "temp"
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+
+        self.client: GsClient = GsClient(
+            context,
+            bot_id=_cfg_str(config, "BOT_ID", "AstrBot"),
+            host=_cfg_str(config, "IP", "localhost"),
+            port=_cfg_str(config, "PORT", "8765"),
+            ws_token=_cfg_str(config, "WS_TOKEN", ""),
+            max_retry=_cfg_int(config, "MAX_RETRY_TIMES", 30),
+            temp_dir=self.temp_dir,
+        )
+
+    @override
+    async def initialize(self) -> None:
+        self._clean_temp_dir()
+        await self.client.start()
+
+    @override
+    async def terminate(self) -> None:
+        await self.client.stop()
+
+    def _clean_temp_dir(self) -> None:
+        """清理上次运行遗留的临时文件(file/video 段发送时落盘)."""
+        try:
+            for f in self.temp_dir.iterdir():
+                if f.is_file():
+                    f.unlink()
+        except OSError as e:
+            logger.warning(f"[GsCore] 清理临时目录失败: {e}")
 
     def _is_gscore_only_message(self, event: AstrMessageEvent) -> bool:
         if not self.GSCORE_ONLY_PREFIXES:
@@ -66,43 +111,7 @@ class GsCoreAdapter(Star):
 
         return any(raw_text.startswith(prefix) for prefix in self.GSCORE_ONLY_PREFIXES)
 
-    def _stop_event_continue(self, event: AstrMessageEvent):
-        """按 AstrBot 文档显式阻断事件传播。"""
-        event.stop_event()
-
-    async def async_connect(
-        self,
-    ):
-        self.is_alive = True
-        self.ws_url = f"ws://{self.IP}:{self.PORT}/ws/{self.BOT_ID}"
-        if self.WS_TOKEN:
-            self.ws_url += f"?token={self.WS_TOKEN}"
-
-        logger.info(f"Bot_ID: {self.BOT_ID}连接至[gsuid-core]: {self.ws_url}...")
-        self.ws = await websockets.client.connect(  # type: ignore
-            self.ws_url, max_size=2**26, open_timeout=3, ping_timeout=10
-        )
-        logger.info(f"与[gsuid-core]成功连接! Bot_ID: {self.BOT_ID}")
-        self.is_connect = True
-        self.msg_list = asyncio.queues.Queue()
-        self.pending = []
-
-    async def connect(self):
-        global gsconnecting
-        if not gsconnecting and not self.is_connect:
-            gsconnecting = True
-            try:
-                await self.async_connect()
-                logger.info("[gsuid-core]: 发起一次连接")
-                await self.start()
-            except Exception as e:
-                logger.error(
-                    f"[链接错误] Core服务器连接失败: {e} ...请确认是否根据文档安装【早柚核心】！"
-                )
-            finally:
-                gsconnecting = False
-
-    async def _convert_image(self, image_msg: Image):
+    async def _convert_image(self, image_msg: Image) -> GsMessage | None:
         img_path = getattr(image_msg, "path", None) or getattr(image_msg, "url", None)
         if not img_path:
             logger.warning(f"[GsCore] 图片消息缺少路径: {image_msg}")
@@ -124,29 +133,60 @@ class GsCoreAdapter(Star):
         base64_data = b64encode(img_data).decode("utf-8")
         return GsMessage(type="image", data=f"base64://{base64_data}")
 
+    async def _build_content(self, event: AstrMessageEvent) -> list[GsMessage]:
+        """把 AstrBot 消息链转换为上报 core 的 GsMessage 列表."""
+        message: list[GsMessage] = []
+        for msg in event.get_messages():
+            if isinstance(msg, Image):
+                image_data = await self._convert_image(msg)
+                if image_data:
+                    message.append(image_data)
+            elif isinstance(msg, File):
+                if msg.file_:
+                    file_val = await file_to_base64(Path(msg.file_))
+                else:
+                    file_val = msg.url or ""
+                message.append(
+                    GsMessage(type="file", data=f"{msg.name or 'file'}|{file_val}")
+                )
+            elif isinstance(msg, Plain):
+                message.append(GsMessage(type="text", data=msg.text))
+            elif isinstance(msg, At):
+                message.append(GsMessage(type="at", data=str(msg.qq)))
+            elif isinstance(msg, Reply):
+                message.append(GsMessage(type="reply", data=msg.id))
+                # 引用消息内的图片一并上报, 供 core 内插件取图
+                for reply_msg in getattr(msg, "chain", None) or []:
+                    if isinstance(reply_msg, Image):
+                        image_data = await self._convert_image(reply_msg)
+                        if image_data:
+                            message.append(image_data)
+            else:
+                logger.warning(f"[GsCore] 不支持的消息类型: {type(msg)}")
+        return message
+
     @filter.event_message_type(EventMessageType.ALL)
-    async def on_all_message(self, event: AstrMessageEvent):
-        if self.is_connect is False:
-            await self.connect()
-
-        if not hasattr(self, "ws"):
-            logger.error(
-                "[链接错误] Core服务器连接失败...请确认是否根据文档安装【早柚核心】！"
-            )
-
-        user_name = event.get_sender_name()
-
-        logger.debug(event.unified_msg_origin)
-
-        message_chain = (
-            event.get_messages()
-        )  # 用户所发的消息的消息链 # from astrbot.api.message_components import *
-        logger.info(message_chain)
+    async def on_all_message(self, event: AstrMessageEvent) -> None:
+        # 幂等: 连接循环若已退出(超过最大重试次数)则重新拉起
+        await self.client.start()
 
         pn = event.get_platform_name()
-        sender = {
-            "nickname": user_name,
-        }
+        # bot_id在gscore内部数据库具有唯一标识符，修改将会造成breaking change
+        bot_id = "onebot" if pn == "aiocqhttp" else pn
+        # bot_self_id 使用平台实例 id, 下发时据此路由回对应平台
+        platform_id = event.get_platform_id() or event.get_self_id()
+        pm = 1 if event.is_admin() else 6
+
+        # 元事件(进群/退群/戳一戳)优先: 命中则单独成包上报, 不进普通消息流程
+        meta_msg = build_meta_receive(event, bot_id, platform_id, pm)
+        if meta_msg is not None:
+            logger.info(f"【发送】[gsuid-core][Meta]: {meta_msg.content[0].type}")
+            await self.client.report(meta_msg)
+            return
+
+        content = await self._build_content(event)
+        if not content:
+            return
 
         self_id = event.get_self_id()
         user_id = str(event.get_sender_id())
@@ -156,290 +196,51 @@ class GsCoreAdapter(Star):
             avatar = f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
         else:
             avatar = ""
-        sender["avatar"] = avatar
-
-        message: list[GsMessage] = []
-        for msg in message_chain:
-            if isinstance(msg, Image):
-                image_data = await self._convert_image(msg)
-                if image_data:
-                    message.append(image_data)
-            elif isinstance(msg, File):
-                if msg.file_:
-                    file_val = await file_to_base64(Path(msg.file_))
-                else:
-                    file_val = msg.url
-                file_name = msg.name
-                message.append(
-                    GsMessage(
-                        type="file",
-                        data=f"{file_name}|{file_val}",
-                    )
-                )
-            elif isinstance(msg, Plain):
-                message.append(
-                    GsMessage(
-                        type="text",
-                        data=msg.text,
-                    )
-                )
-            elif isinstance(msg, At):
-                message.append(
-                    GsMessage(
-                        type="at",
-                        data=str(msg.qq),
-                    )
-                )
-            elif isinstance(msg, Reply):
-                message.append(
-                    GsMessage(
-                        type="reply",
-                        data=msg.id,
-                    )
-                )
-                reply_chain = getattr(msg, "chain", None)
-                if reply_chain:
-                    for reply_msg in reply_chain:
-                        if isinstance(reply_msg, Image):
-                            image_data = await self._convert_image(reply_msg)
-                            if image_data:
-                                message.append(image_data)
-            else:
-                logger.warning(f"不支持的消息类型: {type(msg)}")
-
-        user_type = (
-            "group"
-            if event.get_message_type() == MessageType.GROUP_MESSAGE
-            else "direct"
-        )
-        pm = 1 if event.is_admin() else 6
-
-        platform_id = event.get_platform_id()
-        if platform_id is None:
-            platform_id = self_id
 
         msg = MessageReceive(
-            # bot_id在gscore内部数据库具有唯一标识符，修改将会造成breaking change
-            bot_id="onebot" if pn == "aiocqhttp" else pn,
+            bot_id=bot_id,
             bot_self_id=platform_id,
-            user_type=user_type,
+            user_type=(
+                "group"
+                if event.get_message_type() == MessageType.GROUP_MESSAGE
+                else "direct"
+            ),
             group_id=event.get_group_id(),
             user_id=user_id,
-            sender=sender,
-            content=message,
+            sender={"nickname": event.get_sender_name(), "avatar": avatar},
+            content=content,
+            # 非 onebot 平台下发时以 msg_id 回读会话 id(core 会原样带回)
             msg_id=event.get_session_id(),
             user_pm=pm,
         )
         logger.info(f"【发送】[gsuid-core]: {msg.bot_id}")
-        await self._input(msg)
+        await self.client.report(msg)
 
         if self._is_gscore_only_message(event):
-            self._stop_event_continue(event)
+            # 按 AstrBot 文档显式阻断事件传播, 不参与后续 LLM 等流程
+            event.stop_event()
             logger.info(
                 "[GsCore] 当前消息命中GSCORE_ONLY_PREFIXES，已调用 stop_event() 拦截后续 AstrBot LLM 流程"
             )
 
-    async def _input(self, msg: MessageReceive):
-        if not hasattr(self, "msg_list"):
-            logger.warning("[GsCore] 尚未连接，消息丢弃")
-            return
-        await self.msg_list.put(msg)
-
-    async def send_msg(self):
-        while True:
-            msg: MessageReceive = await self.msg_list.get()
-            msg_send = msgjson.encode(msg)
-            await self.ws.send(msg_send)
-
-    async def start(self):
-        asyncio.create_task(self.recv_msg())
-        asyncio.create_task(self.send_msg())
-        # _, self.pending = await asyncio.wait(
-        #     [recv_task, send_task],
-        #     return_when=asyncio.FIRST_COMPLETED,
-        # )
-
-    async def recv_msg(self):
-        try:
-            await asyncio.sleep(5)
-            async for message in self.ws:
-                try:
-                    msg = msgjson.decode(message, type=MessageSend)
-                    logger.info(
-                        f"【接收】[gsuid-core]: "
-                        f"{msg.bot_id} - {msg.target_type} - {msg.target_id}"
-                    )
-                    # 解析消息
-                    if msg.bot_id == "AstrBot":
-                        if msg.content:
-                            _data = msg.content[0]
-                            if _data.type and _data.type.startswith("log"):
-                                _type = _data.type.split("_")[-1].lower()
-                                getattr(logger, _type)(_data.data)
-                        continue
-
-                    bid = msg.bot_id
-                    if bid == "aiocqhttp" or bid == "dingtalk" or bid == "onebot":
-                        session_id = msg.target_id
-                    elif bid == "lark":
-                        session_id = msg.target_id
-                    elif bid == "dingtalk":
-                        session_id = msg.target_id
-                    elif bid == "wechatpadpro":
-                        session_id = msg.target_id
-                    else:
-                        session_id = msg.msg_id
-
-                    if session_id is None:
-                        logger.warning(f"[GsCore] 消息{msg}没有session_id")
-                        continue
-
-                    if msg.target_id and msg.content:
-                        session = MessageSesion(
-                            msg.bot_self_id,
-                            (
-                                MessageType.GROUP_MESSAGE
-                                if msg.target_type == "group"
-                                else MessageType.FRIEND_MESSAGE
-                            ),
-                            session_id,
-                        )
-                        await self.bot_send_msg(msg.content, session, bid)
-                except Exception as e:
-                    logger.exception(e)
-        except RuntimeError:
-            pass
-        except ConnectionClosedError:
-            for task in self.pending:
-                task.cancel()
-            logger.warning(f"与[gsuid-core]断开连接! Bot_ID: {self.BOT_ID}")
-            self.is_alive = False
-            retry_count = 0
-            while True:
-                # 检查是否达到最大重试次数（-1表示无限重试）
-                if self.MAX_RETRY_TIMES != -1 and retry_count >= self.MAX_RETRY_TIMES:
-                    logger.error(
-                        f"[GsCore] 已达到最大重试次数 ({self.MAX_RETRY_TIMES})，停止重试连接"
-                    )
-                    break
-                
-                await asyncio.sleep(5)
-                try:
-                    await self.async_connect()
-                    await self.start()
-                    break
-                except:  # noqa
-                    retry_count += 1
-                    if self.MAX_RETRY_TIMES == -1:
-                        logger.debug(
-                            f"自动连接core服务器失败（第 {retry_count} 次尝试）...五秒后重新连接..."
-                        )
-                    else:
-                        logger.debug(
-                            f"自动连接core服务器失败（第 {retry_count}/{self.MAX_RETRY_TIMES} 次尝试）...五秒后重新连接..."
-                        )
-
-    async def _to_msg(
-        self, msg: list[GsMessage], bot_id: str
-    ) -> list[BaseMessageComponent]:
-        message = []
-        for _c in msg:
-            if _c.data:
-                if _c.type == "text":
-                    message.append(Plain(_c.data))
-                elif _c.type == "image":
-                    if _c.data.startswith("link://"):
-                        message.append(Image.fromURL(_c.data[7:]))
-                    else:
-                        if _c.data.startswith("base64://"):
-                            _c.data = _c.data[9:]
-                        message.append(
-                            Image.fromBase64(_c.data),  # type: ignore
-                        )
-                elif _c.type == "record":
-                    if _c.data.startswith("base64://"):
-                        d = _c.data[9:]
-                    else:
-                        d = _c.data
-                    message.append(Record.fromBase64(d))
-                elif _c.type == "video":
-                    file_name, file_content = f"{uuid.uuid4().hex}.mp4", _c.data
-                    path = Path(__file__).resolve().parent / file_name
-                    store_file(path, file_content)
-                    message.append(Video.fromFileSystem(str(path)))
-                elif _c.type == "node":
-                    # 特殊处理 qq 平台
-                    if bot_id == "onebot":
-                        node_message: list[Node] = []
-                        for _node in _c.data:
-                            node_message.append(
-                                Node(
-                                    await self._to_msg(
-                                        [GsMessage(**_node)],
-                                        bot_id,
-                                    )
-                                )
-                            )
-
-                        # 将一条消息转为多条消息，优化观感
-                        message.append(
-                            Nodes(
-                                node_message,
-                            )
-                        )
-                    else:
-                        for _node in _c.data:
-                            message.extend(
-                                await self._to_msg(
-                                    [GsMessage(**_node)],
-                                    bot_id,
-                                )
-                            )
-                elif _c.type == "file":
-                    file_name, file_content = _c.data.split("|")
-                    path = Path(__file__).resolve().parent / file_name
-                    store_file(path, file_content)
-                    message.append(File(file_name, str(path)))
-                elif _c.type == "at":
-                    message.append(At(qq=_c.data))
-        return message
-
-    async def bot_send_msg(
-        self,
-        gsmsgs: list[GsMessage],
-        session: MessageSesion,
-        bot_id: str,
-    ):
-        messages = MessageChain()
-        message = await self._to_msg(gsmsgs, bot_id)
-
-        messages.chain.extend(message)
-        logger.info(f"【即将发送】[gsuid-core]: {messages}")
-        await self.context.send_message(session, messages)
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("连接core", alias={"链接core"})
+    async def connect_core(
+        self, event: AstrMessageEvent
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """手动重连 gsuid_core."""
+        await self.client.start()
+        for _ in range(6):
+            if self.client.is_connected:
+                break
+            await asyncio.sleep(0.5)
+        if self.client.is_connected:
+            yield event.plain_result("链接成功！")
+        else:
+            yield event.plain_result("正在尝试连接core, 请稍后通过日志确认连接状态...")
 
 
-def store_file(path: Path, file: str):
-    if file.startswith("base64://"):
-        file = file[9:]
-    file_content = base64.b64decode(file)
-    with open(path, "wb") as f:
-        f.write(file_content)
-
-
-def del_file(path: Path):
-    if path.exists():
-        os.remove(path)
-
-
-async def file_to_base64(file_path: Path):
-    # 读取文件内容
+async def file_to_base64(file_path: Path) -> str:
     async with aiofiles.open(str(file_path), "rb") as file:
         file_content = await file.read()
-
-    # 将文件内容转换为base64编码
-    base64_encoded = b64encode(file_content)
-
-    # 将base64编码的字节转换为字符串
-    base64_string = base64_encoded.decode("utf-8")
-
-    return base64_string
+    return b64encode(file_content).decode("utf-8")

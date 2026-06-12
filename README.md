@@ -1,4 +1,4 @@
-# ⚙️ astrbot_plugin_gscore_adapter v0.4.3
+# ⚙️ astrbot_plugin_gscore_adapter v0.5.0
 
 > [!IMPORTANT]  
 > 请注意！该插件并不能开箱即用，你还需要完成Core的安装和配置！！
@@ -17,6 +17,15 @@
 - `GSCORE_ONLY_PREFIXES`：可选字符串列表。
   - 示例：`["core", "gs", "sr", "zzz", "ww"]`
   - 当用户消息文本命中这些前缀时，消息仅会发送给 GsCore，并显式调用 `event.stop_event()` 阻断后续 LLM 流程。
+
+## v0.5.0 新特性
+
+- ✨ **元事件上报**：监听三种标准元事件 `user_join_group`(进群) / `user_exit_group`(退群) / `poke`(戳一戳)，以 `meta-<事件名>` 单段消息上报 core，可被插件 `@sv.on_meta(...)` 触发器消费，`data` 字段与 NoneBot2 适配器完全一致。目前 AstrBot 仅 aiocqhttp(OneBot V11) 平台会向插件下发此类事件，其余平台待框架支持后可在 `meta_event.py` 中直接扩展。
+- ✨ **撤回回执（`wait_recall`）**：core 下发的 `MessageSend.echo` 非空时，发送完成后回传 `recall_message_id` 回执，插件侧 `await bot.send(msg, wait_recall=True)` 可拿到平台真实消息 id。aiocqhttp 平台直发并捕获真实 `message_id`；其余平台回执 `id=None`（core 立即结算，不会空等超时）。
+- ✨ **主动撤回（`bot.unsend`）**：处理 core 下发的 `excute_delete_message` 控制包，支持 aiocqhttp / telegram / lark / discord 平台撤回。
+- ✨ **禁言（`bot.ban`）**：处理 core 下发的 `excute_ban_user` 段，支持 aiocqhttp 平台（`duration=0` 解除禁言）。
+- ✨ **管理员命令** `/连接core`（别名 `/链接core`）：手动重连 core。
+- ♻️ **结构重构**：连接生命周期独立为 `client.py`（统一监督循环，断连暂存消息、重连补发），下发与控制包处理独立为 `send_utils.py`，元事件映射独立为 `meta_event.py`；插件加载即自动连接 core，卸载/重载时优雅断开；临时文件改存 `data/plugin_data/astrbot_plugin_gscore_adapter/temp` 并在启动时自动清理。
 
 ## 优点&特色
 
