@@ -10,8 +10,10 @@
 
 import asyncio
 import base64
+import random
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 from astrbot.api import logger
@@ -45,6 +47,9 @@ if TYPE_CHECKING:
         DiscordPlatformAdapter,
     )
     from astrbot.core.platform.sources.lark.lark_adapter import LarkPlatformAdapter
+    from astrbot.core.platform.sources.qqofficial.qqofficial_platform_adapter import (
+        QQOfficialPlatformAdapter,
+    )
     from astrbot.core.platform.sources.telegram.tg_adapter import (
         TelegramPlatformAdapter,
     )
@@ -161,9 +166,7 @@ async def aiocqhttp_send(
             ids.append(str(ret["message_id"]))
 
     # 转发消息、文件消息不能和普通消息混在一起发送
-    send_one_by_one = any(
-        isinstance(seg, (Node, Nodes, File)) for seg in chain.chain
-    )
+    send_one_by_one = any(isinstance(seg, (Node, Nodes, File)) for seg in chain.chain)
     if not send_one_by_one:
         messages = await AiocqhttpMessageEvent._parse_onebot_json(  # pyright: ignore[reportPrivateUsage]
             chain
@@ -203,6 +206,154 @@ async def aiocqhttp_send(
     return ids[0] if len(ids) == 1 else ids
 
 
+async def qqofficial_send(
+    platform: Platform,
+    chain: MessageChain,
+    is_group: bool,
+    session_id: str,
+) -> None:
+    """qq_official 平台直发, 复用被动回复 msg_id 规避"主动消息无权限".
+
+    背景: AstrBot 通用发送路径(context.send_message → send_by_session)对
+    qq_official 有两个会退化为"主动消息"的问题——
+      1) 私聊(C2C)分支强制丢弃 msg_id 当主动推送, 未开通主动消息权限的 Bot
+         直接报"主动消息失败, 无权限";
+      2) 群聊分支每发一条会把"Bot 自己发出的消息 id"写回会话缓存, 后续消息
+         以该 id 作被动回复锚点(对自身出站消息无效), 同样退化为主动消息——
+         gscore 单次指令常下发多条消息, 故群聊从第二条起即报无权限。
+    这里绕过通用路径直发: 始终以"框架在收包时缓存的最近一条入站(用户)消息
+    id"作被动回复锚点, 且不回写缓存, 使群聊/私聊连续多条消息都走被动回复。
+
+    发送行为(媒体拆分/上传/分场景 API)对齐 QQOfficialPlatformAdapter.
+    _send_by_session_common, 唯一差异是保留 msg_id、不回写会话缓存。
+    """
+    from astrbot.core.platform.sources.qqofficial.qqofficial_message_event import (
+        QQOfficialMessageEvent,
+    )
+
+    # 富媒体需逐条拆分发送(普通段合并), 与上游 _split_message_chain_by_media 一致
+    chains = QQOfficialMessageEvent._split_message_chain_by_media(chain)  # pyright: ignore[reportPrivateUsage]
+    if len(chains) > 1:
+        for split in chains:
+            await qqofficial_send(platform, split, is_group, session_id)
+        return
+
+    (
+        plain_text,
+        image_base64,
+        image_path,
+        record_file_path,
+        video_file_source,
+        file_source,
+        file_name,
+    ) = await QQOfficialMessageEvent._parse_to_qqofficial(chain)  # pyright: ignore[reportPrivateUsage]
+    if not (
+        plain_text
+        or image_base64
+        or image_path
+        or record_file_path
+        or video_file_source
+        or file_source
+    ):
+        return
+
+    adapter = cast("QQOfficialPlatformAdapter", platform)
+    bot = adapter.get_client()
+    # 框架收包时缓存的最近一条入站(用户)消息 id; 直发不经 send_by_session,
+    # 不会被"Bot 自身出站 id"污染, 因而连续多条消息都能命中有效被动锚点
+    msg_id = adapter._session_last_message_id.get(session_id)  # pyright: ignore[reportPrivateUsage]
+    # 复用上游富媒体上传/C2C 发送(仅依赖 self.bot), 借 SimpleNamespace 充当 self;
+    # 经 object 中转规避 reportInvalidCast(两类型无重叠, 此处为有意的鸭子类型)
+    helper = cast(QQOfficialMessageEvent, cast(object, SimpleNamespace(bot=bot)))
+    payload: dict[str, Any] = {"content": plain_text, "msg_id": msg_id}
+
+    if is_group:
+        scene = adapter._session_scene.get(session_id)  # pyright: ignore[reportPrivateUsage]
+        if scene == "group":
+            payload["msg_seq"] = random.randint(1, 10000)
+            if image_base64:
+                payload["media"] = await helper.upload_group_and_c2c_image(
+                    image_base64,
+                    QQOfficialMessageEvent.IMAGE_FILE_TYPE,
+                    group_openid=session_id,
+                )
+                payload["msg_type"] = 7
+            if record_file_path:
+                media = await helper.upload_group_and_c2c_media(
+                    record_file_path,
+                    QQOfficialMessageEvent.VOICE_FILE_TYPE,
+                    group_openid=session_id,
+                )
+                if media:
+                    payload["media"] = media
+                    payload["msg_type"] = 7
+            if video_file_source:
+                media = await helper.upload_group_and_c2c_media(
+                    video_file_source,
+                    QQOfficialMessageEvent.VIDEO_FILE_TYPE,
+                    group_openid=session_id,
+                )
+                if media:
+                    payload["media"] = media
+                    payload["msg_type"] = 7
+                    payload.pop("msg_id", None)
+            if file_source:
+                media = await helper.upload_group_and_c2c_media(
+                    file_source,
+                    QQOfficialMessageEvent.FILE_FILE_TYPE,
+                    file_name=file_name,
+                    group_openid=session_id,
+                )
+                if media:
+                    payload["media"] = media
+                    payload["msg_type"] = 7
+                    payload.pop("msg_id", None)
+            _ = await bot.api.post_group_message(group_openid=session_id, **payload)
+        else:
+            # 频道(guild)文本消息: 用 file_image 直传, 不受群/私聊主动消息限制
+            if image_path:
+                payload["file_image"] = image_path
+            _ = await bot.api.post_message(channel_id=session_id, **payload)
+    else:
+        payload["msg_seq"] = random.randint(1, 10000)
+        if image_base64:
+            payload["media"] = await helper.upload_group_and_c2c_image(
+                image_base64,
+                QQOfficialMessageEvent.IMAGE_FILE_TYPE,
+                openid=session_id,
+            )
+            payload["msg_type"] = 7
+        if record_file_path:
+            media = await helper.upload_group_and_c2c_media(
+                record_file_path,
+                QQOfficialMessageEvent.VOICE_FILE_TYPE,
+                openid=session_id,
+            )
+            if media:
+                payload["media"] = media
+                payload["msg_type"] = 7
+        if video_file_source:
+            media = await helper.upload_group_and_c2c_media(
+                video_file_source,
+                QQOfficialMessageEvent.VIDEO_FILE_TYPE,
+                openid=session_id,
+            )
+            if media:
+                payload["media"] = media
+                payload["msg_type"] = 7
+        if file_source:
+            media = await helper.upload_group_and_c2c_media(
+                file_source,
+                QQOfficialMessageEvent.FILE_FILE_TYPE,
+                file_name=file_name,
+                openid=session_id,
+            )
+            if media:
+                payload["media"] = media
+                payload["msg_type"] = 7
+        _ = await helper.post_c2c_message(openid=session_id, **payload)
+
+
 async def del_msg(context: Context, msg: MessageSend) -> None:
     """撤回已发出的消息(对应 core 下发的 excute_delete_message 控制包).
 
@@ -229,17 +380,13 @@ async def del_msg(context: Context, msg: MessageSend) -> None:
             chat_id = (msg.target_id or "").split("#")[0]
             if chat_id:
                 tg_bot = cast("TelegramPlatformAdapter", platform).get_client()
-                await tg_bot.delete_message(
-                    chat_id=chat_id, message_id=int(message_id)
-                )
+                await tg_bot.delete_message(chat_id=chat_id, message_id=int(message_id))
         elif name == "lark":
             from lark_oapi.api.im.v1 import (  # pyright: ignore[reportMissingImports]
                 DeleteMessageRequest,
             )
 
-            request = (
-                DeleteMessageRequest.builder().message_id(message_id).build()
-            )
+            request = DeleteMessageRequest.builder().message_id(message_id).build()
             lark_api = cast("LarkPlatformAdapter", platform).lark_api
             await lark_api.im.v1.message.adelete(request)
         elif name == "discord":
@@ -268,8 +415,7 @@ async def execute_ban_user(platform: Platform | None, data: Any) -> None:
     if user_id is None or group_id is None:
         return
     if not (
-        isinstance(duration, int)
-        or (isinstance(duration, str) and duration.isdigit())
+        isinstance(duration, int) or (isinstance(duration, str) and duration.isdigit())
     ):
         return
     if platform is None or platform.meta().name != "aiocqhttp":

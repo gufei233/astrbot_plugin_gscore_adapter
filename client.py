@@ -18,13 +18,14 @@ from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.star.context import Context
 from msgspec import json as msgjson
-from websockets.asyncio.client import ClientConnection, connect as ws_connect
+from websockets.asyncio.client import ClientConnection
+from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 from websockets.protocol import State
 
 from .models import Message as GsMessage
 from .models import MessageReceive, MessageSend
-from .send_utils import aiocqhttp_send, del_msg, gs_to_components
+from .send_utils import aiocqhttp_send, del_msg, gs_to_components, qqofficial_send
 
 RECONNECT_INTERVAL = 5  # 秒
 
@@ -127,9 +128,7 @@ class GsClient:
         logger.info(f"Bot_ID: {self.bot_id}连接至[gsuid-core]: {ws_url}...")
         if self.ws_token:
             ws_url += f"?token={self.ws_token}"
-        ws = await ws_connect(
-            ws_url, max_size=2**26, open_timeout=3, ping_timeout=10
-        )
+        ws = await ws_connect(ws_url, max_size=2**26, open_timeout=3, ping_timeout=10)
         self._ws = ws
         logger.info(f"与[gsuid-core]成功连接! Bot_ID: {self.bot_id}")
         return ws
@@ -231,6 +230,17 @@ class GsClient:
             sid = session_id.split("_")[-1] if is_group else session_id
             if sid.isdigit():
                 return await aiocqhttp_send(platform, chain, is_group, sid)
+
+        # qq_official 通用发送会丢弃/污染 msg_id 退化为主动消息(无权限);
+        # 直发并复用缓存的入站 msg_id 走被动回复, 详见 qqofficial_send
+        if platform is not None and platform.meta().name == "qq_official":
+            await qqofficial_send(
+                platform,
+                chain,
+                is_group,
+                session_id,
+            )
+            return None
 
         session = MessageSession(
             msg.bot_self_id,
