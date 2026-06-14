@@ -133,37 +133,60 @@ class GsCoreAdapter(Star):
         base64_data = b64encode(img_data).decode("utf-8")
         return GsMessage(type="image", data=f"base64://{base64_data}")
 
-    async def _build_content(self, event: AstrMessageEvent) -> list[GsMessage]:
-        """把 AstrBot 消息链转换为上报 core 的 GsMessage 列表."""
-        message: list[GsMessage] = []
-        for msg in event.get_messages():
-            if isinstance(msg, Image):
-                image_data = await self._convert_image(msg)
-                if image_data:
-                    message.append(image_data)
-            elif isinstance(msg, File):
-                if msg.file_:
-                    file_val = await file_to_base64(Path(msg.file_))
-                else:
-                    file_val = msg.url or ""
-                message.append(
-                    GsMessage(type="file", data=f"{msg.name or 'file'}|{file_val}")
-                )
-            elif isinstance(msg, Plain):
-                message.append(GsMessage(type="text", data=msg.text))
-            elif isinstance(msg, At):
-                message.append(GsMessage(type="at", data=str(msg.qq)))
-            elif isinstance(msg, Reply):
-                message.append(GsMessage(type="reply", data=msg.id))
-                # 引用消息内的图片一并上报, 供 core 内插件取图
-                for reply_msg in getattr(msg, "chain", None) or []:
-                    if isinstance(reply_msg, Image):
-                        image_data = await self._convert_image(reply_msg)
-                        if image_data:
-                            message.append(image_data)
+    async def _build_single_content(
+        self, msg: object, *, from_reply: bool = False
+    ) -> list[GsMessage]:
+        """把单个 AstrBot 消息段转换为 core 消息段."""
+        if isinstance(msg, Image):
+            image_data = await self._convert_image(msg)
+            return [image_data] if image_data else []
+        if isinstance(msg, File):
+            if msg.file_:
+                file_val = await file_to_base64(Path(msg.file_))
             else:
-                logger.warning(f"[GsCore] 不支持的消息类型: {type(msg)}")
-        return message
+                file_val = msg.url or ""
+            return [GsMessage(type="file", data=f"{msg.name or 'file'}|{file_val}")]
+        if isinstance(msg, Plain):
+            return [GsMessage(type="text", data=msg.text)]
+        if isinstance(msg, At):
+            return [GsMessage(type="at", data=str(msg.qq))]
+
+        # 引用消息内经常会带 Json/Face 等 core 不消费的消息段；这些不应阻止
+        # 当前消息里的命令文本继续上报。
+        if not from_reply:
+            logger.warning(f"[GsCore] 不支持的消息类型: {type(msg)}")
+        return []
+
+    async def _build_content(self, event: AstrMessageEvent) -> list[GsMessage]:
+        """把 AstrBot 消息链转换为上报 core 的 GsMessage 列表.
+
+        AstrBot/OneBot 的引用消息通常排在消息链最前面，例如：
+        [Reply(...引用图片...), Plain("ww评分校长")]
+
+        gsuid_core 的命令匹配更依赖当前消息文本。若按原始顺序把 reply/引用图片
+        放在最前面，部分 core 插件会先看到 reply/image 段而错过后面的命令文本。
+        因此这里优先上报“当前消息”的文本/at/图片等内容，再把 reply 段和引用
+        消息里的图片作为上下文附加到末尾。这样 quoted-image + command 可以正常
+        触发，同时仍保留被引用图片给需要取图的插件使用。
+        """
+        current_message: list[GsMessage] = []
+        quoted_context: list[GsMessage] = []
+
+        for msg in event.get_messages():
+            if isinstance(msg, Reply):
+                quoted_context.append(GsMessage(type="reply", data=msg.id))
+                # 引用消息内的图片一并上报，供 core 内插件取图。
+                for reply_msg in getattr(msg, "chain", None) or []:
+                    # 只把 core 常用媒体上下文带过去；忽略 Json/Face 等无关引用段。
+                    if isinstance(reply_msg, Image):
+                        quoted_context.extend(
+                            await self._build_single_content(reply_msg, from_reply=True)
+                        )
+                continue
+
+            current_message.extend(await self._build_single_content(msg))
+
+        return current_message + quoted_context
 
     @filter.event_message_type(EventMessageType.ALL)
     async def on_all_message(self, event: AstrMessageEvent) -> None:
