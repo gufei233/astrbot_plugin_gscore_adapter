@@ -20,8 +20,7 @@ import aiofiles
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.star import Context, Star, StarTools, register
-from astrbot.api.web import error_response, file_response
-from astrbot.core import astrbot_config
+from astrbot.core import astrbot_config, file_token_service
 from astrbot.core.message.components import At, File, Image, Plain, Reply
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.star.filter.event_message_type import EventMessageType
@@ -75,12 +74,6 @@ class GsCoreAdapter(Star):
 
         self.temp_dir: Path = StarTools.get_data_dir(PLUGIN_NAME) / "temp"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
-        context.register_web_api(
-            f"/{PLUGIN_NAME}/files/<filename>",
-            self._serve_temp_file,
-            ["GET"],
-            "Serve temporary files for gsuid_core",
-        )
 
         self.client: GsClient = GsClient(
             context,
@@ -110,18 +103,6 @@ class GsCoreAdapter(Star):
         except OSError as e:
             logger.warning(f"[GsCore] 清理临时目录失败: {e}")
 
-    async def _serve_temp_file(self, filename: str):
-        file_path = self.temp_dir / filename
-        try:
-            if file_path.resolve().parent != self.temp_dir.resolve():
-                return error_response("file not found", status_code=404)
-        except OSError:
-            return error_response("file not found", status_code=404)
-
-        if not file_path.is_file():
-            return error_response("file not found", status_code=404)
-        return file_response(file_path)
-
     def _is_gscore_only_message(self, event: AstrMessageEvent) -> bool:
         if not self.GSCORE_ONLY_PREFIXES:
             return False
@@ -145,10 +126,8 @@ class GsCoreAdapter(Star):
                 await dst.write(await src.read())
 
         callback_host = str(callback_host).rstrip("/")
-        return (
-            f"{callback_host}/api/v1/plugins/extensions/"
-            f"{PLUGIN_NAME}/files/{target_path.name}"
-        )
+        token = await file_token_service.register_file(str(target_path))
+        return f"{callback_host}/api/file/{token}"
 
     async def _convert_image(self, image_msg: Image) -> GsMessage | None:
         image_url = getattr(image_msg, "url", None)
