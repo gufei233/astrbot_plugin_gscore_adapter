@@ -112,7 +112,10 @@ class GsCoreAdapter(Star):
         return any(raw_text.startswith(prefix) for prefix in self.GSCORE_ONLY_PREFIXES)
 
     async def _convert_image(self, image_msg: Image) -> GsMessage | None:
-        img_path = getattr(image_msg, "path", None) or getattr(image_msg, "url", None)
+        image_url = getattr(image_msg, "url", None)
+        image_file = getattr(image_msg, "file", None)
+        image_path = getattr(image_msg, "path", None)
+        img_path = image_url or image_file or image_path
         if not img_path:
             logger.warning(f"[GsCore] 图片消息缺少路径: {image_msg}")
             return None
@@ -120,18 +123,28 @@ class GsCoreAdapter(Star):
         if isinstance(img_path, str) and img_path.startswith("http"):
             return GsMessage(type="image", data=img_path)
 
-        file_path = Path(str(img_path))
-        if not file_path.exists():
-            file_path = Path(__file__).parent / str(img_path)
-        if not file_path.exists():
-            logger.warning(f"[GsCore] 图片文件不存在: {img_path}")
+        image_for_convert = image_msg
+        if not image_url and not image_file and image_path:
+            file_path = Path(str(image_path))
+            if not file_path.exists():
+                file_path = Path(__file__).parent / str(image_path)
+            if not file_path.exists():
+                logger.warning(f"[GsCore] 图片文件不存在: {image_path}")
+                return None
+            image_for_convert = Image.fromFileSystem(str(file_path))
+
+        try:
+            file_url = await image_for_convert.register_to_file_service()
+            return GsMessage(type="image", data=file_url)
+        except Exception as e:
+            logger.warning(f"[GsCore] 图片生成HTTP文件外链失败，回退base64: {e}")
+
+        try:
+            base64_data = await image_for_convert.convert_to_base64()
+            return GsMessage(type="image", data=f"base64://{base64_data}")
+        except Exception as e:
+            logger.warning(f"[GsCore] 图片转base64失败: {e}")
             return None
-
-        async with aiofiles.open(file_path, "rb") as f:
-            img_data = await f.read()
-
-        base64_data = b64encode(img_data).decode("utf-8")
-        return GsMessage(type="image", data=f"base64://{base64_data}")
 
     async def _build_single_content(
         self, msg: object, *, from_reply: bool = False
