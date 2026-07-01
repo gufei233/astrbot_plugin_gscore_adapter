@@ -13,6 +13,7 @@ import asyncio
 from base64 import b64encode
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from time import time
 from typing import override
 from uuid import uuid4
 
@@ -31,6 +32,7 @@ from .models import Message as GsMessage
 from .models import MessageReceive
 
 PLUGIN_NAME = "astrbot_plugin_gscore_adapter"
+TEMP_IMAGE_MAX_AGE_SECONDS = 600
 
 
 def _cfg_str(config: AstrBotConfig, key: str, default: str) -> str:
@@ -103,6 +105,15 @@ class GsCoreAdapter(Star):
         except OSError as e:
             logger.warning(f"[GsCore] 清理临时目录失败: {e}")
 
+    def _clean_expired_temp_images(self) -> None:
+        try:
+            now = time()
+            for f in self.temp_dir.glob("image_*"):
+                if f.is_file() and now - f.stat().st_mtime > TEMP_IMAGE_MAX_AGE_SECONDS:
+                    f.unlink()
+        except OSError as e:
+            logger.warning(f"[GsCore] 清理过期图片临时文件失败: {e}")
+
     def _is_gscore_only_message(self, event: AstrMessageEvent) -> bool:
         if not self.GSCORE_ONLY_PREFIXES:
             return False
@@ -118,6 +129,7 @@ class GsCoreAdapter(Star):
         if not callback_host:
             raise RuntimeError("未配置 callback_api_base，文件服务不可用")
 
+        self._clean_expired_temp_images()
         file_path = Path(await image_msg.convert_to_file_path())
         suffix = file_path.suffix or ".jpg"
         target_path = self.temp_dir / f"image_{uuid4().hex}{suffix}"
