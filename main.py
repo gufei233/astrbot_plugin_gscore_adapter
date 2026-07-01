@@ -14,11 +14,14 @@ from base64 import b64encode
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import override
+from uuid import uuid4
 
 import aiofiles
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.api.web import error_response, file_response
+from astrbot.core import astrbot_config
 from astrbot.core.message.components import At, File, Image, Plain, Reply
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.star.filter.event_message_type import EventMessageType
@@ -72,6 +75,12 @@ class GsCoreAdapter(Star):
 
         self.temp_dir: Path = StarTools.get_data_dir(PLUGIN_NAME) / "temp"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/files/<filename>",
+            self._serve_temp_file,
+            ["GET"],
+            "Serve temporary files for gsuid_core",
+        )
 
         self.client: GsClient = GsClient(
             context,
@@ -101,6 +110,18 @@ class GsCoreAdapter(Star):
         except OSError as e:
             logger.warning(f"[GsCore] 清理临时目录失败: {e}")
 
+    async def _serve_temp_file(self, filename: str):
+        file_path = self.temp_dir / filename
+        try:
+            if file_path.resolve().parent != self.temp_dir.resolve():
+                return error_response("file not found", status_code=404)
+        except OSError:
+            return error_response("file not found", status_code=404)
+
+        if not file_path.is_file():
+            return error_response("file not found", status_code=404)
+        return file_response(file_path)
+
     def _is_gscore_only_message(self, event: AstrMessageEvent) -> bool:
         if not self.GSCORE_ONLY_PREFIXES:
             return False
@@ -110,6 +131,24 @@ class GsCoreAdapter(Star):
             return False
 
         return any(raw_text.startswith(prefix) for prefix in self.GSCORE_ONLY_PREFIXES)
+
+    async def _register_temp_file_url(self, image_msg: Image) -> str:
+        callback_host = astrbot_config.get("callback_api_base")
+        if not callback_host:
+            raise RuntimeError("未配置 callback_api_base，文件服务不可用")
+
+        file_path = Path(await image_msg.convert_to_file_path())
+        suffix = file_path.suffix or ".jpg"
+        target_path = self.temp_dir / f"image_{uuid4().hex}{suffix}"
+        async with aiofiles.open(file_path, "rb") as src:
+            async with aiofiles.open(target_path, "wb") as dst:
+                await dst.write(await src.read())
+
+        callback_host = str(callback_host).rstrip("/")
+        return (
+            f"{callback_host}/api/v1/plugins/extensions/"
+            f"{PLUGIN_NAME}/files/{target_path.name}"
+        )
 
     async def _convert_image(self, image_msg: Image) -> GsMessage | None:
         image_url = getattr(image_msg, "url", None)
@@ -134,7 +173,7 @@ class GsCoreAdapter(Star):
             image_for_convert = Image.fromFileSystem(str(file_path))
 
         try:
-            file_url = await image_for_convert.register_to_file_service()
+            file_url = await self._register_temp_file_url(image_for_convert)
             return GsMessage(type="image", data=file_url)
         except Exception as e:
             logger.warning(f"[GsCore] 图片生成HTTP文件外链失败，回退base64: {e}")
